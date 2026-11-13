@@ -1,0 +1,12 @@
+{
+  "goal": "Validar a integração local em um repositório descartável",
+  "tasks": [
+    {
+      "id": "smoke",
+      "description": "Crie smoke.txt com exatamente a linha orchestrator-ok seguida de uma quebra de linha.",
+      "deps": [],
+      "files": ["smoke.txt"],
+      "acceptance": ["smoke.txt contém exatamente orchestrator-ok e uma quebra de linha"]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+.agent-runs/
+__pycache__/
+*.pyc
+.env
+
+.venv/
+.mcp.json
+.env.*
+!.env.example

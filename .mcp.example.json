@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "antigravity-orchestrator": {
+      "command": "C:\\CAMINHO\\DO\\PROJETO\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\CAMINHO\\DO\\PROJETO\\mcp_server.py"]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "goal": "Criar uma API de exemplo com testes",
+  "tasks": [
+    {"id":"T001", "description":"Criar estrutura inicial da API", "deps":[], "files":["src/app.py","tests/test_app.py"], "acceptance":["API inicia","Testes passam"]},
+    {"id":"T002", "description":"Adicionar endpoint de saúde", "deps":["T001"], "files":["src/app.py","tests/test_health.py"], "acceptance":["GET /health responde 200","Testes passam"]}
+  ]
+}
