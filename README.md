@@ -121,7 +121,7 @@ Peça ao Claude na aba Code:
 
 ## Comportamento e limitações
 - O Claude cria o grafo de tarefas e envia pelo MCP. A fila é executada por Python, chamando `agy` em worktrees locais isolados.
-- O Claude CLI avalia diffs/resultados após cada tarefa. Uma aprovação **não** substitui os testes.
+- O Claude Code CLI revisa diffs usando explicitamente o alias `sonnet`. Uma aprovação **não** substitui os testes.
 - Tarefas independentes, que não anunciam ownership conflitante, podem rodar em paralelo; a integração ocorre sequencialmente.
 - Falhas de cherry-pick param a tarefa. Não faz deploy, push ou exclusões automáticas de worktrees.
 - `get_run_status` precisa ser consultado; o aplicativo Claude não recebe notificação push de término.

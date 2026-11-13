@@ -152,7 +152,7 @@ def review(task, artifact, test_command):
                      'patch':patch, 'executor_report':artifact['report'],
                      'test_exit_code':test.returncode if test else None,
                      'test_output':test_output}, ensure_ascii=False))
-    response = cmd(['claude', '-p', prompt, '--output-format', 'json', '--max-turns', '1'], cwd=wt, timeout=900)
+    response = cmd(['claude', '-p', prompt, '--model', 'sonnet', '--output-format', 'json', '--max-turns', '1'], cwd=wt, timeout=900)
     verdict = parse_json_output(response.stdout, 'claude').strip()
     approved = verdict.startswith('APPROVED') and (test is None or test.returncode == 0)
     return approved, verdict, test_output
