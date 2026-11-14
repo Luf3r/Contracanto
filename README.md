@@ -1,9 +1,9 @@
 # Claude Desktop → MCP → Python → Antigravity CLI
 
-**Protótipo de integração local para Windows**, não validado contra suas credenciais, CLI e repositório reais. Não é solução de produção.
+**Protótipo de integração local para Windows**, com regressões automatizadas e smoke local anterior. Cada máquina precisa validar suas credenciais e permissões. Não é solução de produção.
 
 ## Pré-requisitos
-- Windows, Python 3.11+, Git for Windows
+- Windows, Python 3.13–3.15, Git for Windows. Ambiente local validado: Python 3.15.2, MCP 1.30.0, `agy` 1.5.8 e Claude Code 2.1.325. A matriz de CI está configurada para Python 3.13 e 3.15 em Windows e Linux; confira o resultado do workflow antes de adotar outra combinação.
 - Aplicativo Claude Desktop (aba Code, sessão **Local**)
 - Claude Code CLI instalado e autenticado (`claude --version`, `claude -p "oi"`)
 - Antigravity App e CLI (`agy --version`), com autenticação realizada interativamente
@@ -24,7 +24,8 @@ agy
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install -r requirements.lock.txt
+python -m pip check
 claude --version
 agy --version
 ```
@@ -39,7 +40,7 @@ git status --porcelain
 ```
 
 O último comando deve retornar vazio. Configure `git config user.name` e `git config user.email` caso o Git solicite sua identidade.
-4. Use **preferencialmente** o modo Auto com sandbox e allowlist limitada no Antigravity, jamais `--dangerously-skip-permissions`. O modo headless pode negar comandos não autorizados. Configure permissões granulares conforme docs: https://antigravity.google/docs/cli/headless/
+4. O executor e todas as correções passam explicitamente `--mode auto --sandbox` ao Antigravity, sem `--dangerously-skip-permissions`. Configure uma allowlist limitada no CLI antes de operar. Comandos negados devem ser autorizados de forma granular; não desative o sandbox para contornar a falha. O modo headless pode negar comandos não autorizados. Configure permissões granulares conforme docs: https://antigravity.google/docs/cli/headless/
 
 ## Teste sem MCP
 Edite `plan.example.json` com tasks reais e arquivos autorizados. Use um repositório descartável. Exemplo:
@@ -60,7 +61,7 @@ Os testes usam `unittest`, incluído no Python, e Git local. Não chamam os CLIs
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Há regressões de parsing da CLI, validação de escopo, dependências, reserva de execução e rollback por timeout. Um teste usa commits, worktree, cherry-pick e revert reais em um repositório temporário dentro de `.agent-runs/`.
+Há regressões de parsing da CLI, escopo com Unicode/espaços/renomeações, prompts grandes por stdin, estado terminal, reserva de execução e rollback. Há testes com Git e subprocessos reais para encerramento de descendentes por timeout, execução paralela, dependências e rejeição seguida de correção e integração. Apenas os modelos são substituídos nesses testes. A CI executa a suíte e `pip check`. No Windows, a verificação de timeout usa `taskkill /T /F`; ambientes que bloqueiem esse comando impedem a confirmação do encerramento e exigem recuperação manual.
 
 Para testar os CLIs reais, use uma cópia descartável deste projeto com Git limpo, autenticações ativas e permissões adequadas. O smoke cria apenas `smoke.txt` e **consome chamadas dos modelos**:
 
@@ -121,7 +122,7 @@ Peça ao Claude na aba Code:
 
 ## Comportamento e limitações
 - O Claude cria o grafo de tarefas e envia pelo MCP. A fila é executada por Python, chamando `agy` em worktrees locais isolados.
-- O Claude Code CLI revisa diffs usando explicitamente o alias `sonnet`. Uma aprovação **não** substitui os testes.
+- O Claude Code CLI revisa o patch completo usando explicitamente o alias `sonnet`, sem ferramentas internas e sem carregar servidores MCP. Prompts seguem por stdin para evitar o limite de argumentos do Windows. Somente a primeira linha exata `APPROVED`, com testes executados e aprovados, permite integrar.
 - Tarefas independentes, que não anunciam ownership conflitante, podem rodar em paralelo; a integração ocorre sequencialmente.
 - Falhas de cherry-pick param a tarefa. Não faz deploy, push ou exclusões automáticas de worktrees.
 - `get_run_status` precisa ser consultado; o aplicativo Claude não recebe notificação push de término.
@@ -131,11 +132,15 @@ Peça ao Claude na aba Code:
 
 ## Estado e recuperação
 
-CLI e MCP compartilham uma reserva exclusiva em `.agent-runs/run.lock`, criada antes de gravar o plano ou iniciar o processo. Uma segunda execução é recusada. A reserva é liberada ao término normal, inclusive em erros tratados; interrupções abruptas podem preservá-la.
+CLI e MCP compartilham uma reserva exclusiva em `.agent-runs/run.lock`, criada antes de gravar o plano ou iniciar o processo. Uma segunda execução é recusada. A reserva é liberada ao término normal e em erros tratados com estado conhecido. Em falhas de recuperação Git ou encerramento incerto de subprocessos, `recovery_required: true` preserva a reserva para impedir novas execuções até inspeção manual. Interrupções abruptas também podem preservá-la.
+
+O estado global final é `completed` quando todas as tarefas são aprovadas, ou `failed`, inclusive em falhas de preparação; erros de preparação ficam em `error`, associados a `run_id`. A submissão MCP inicia em `starting`; durante o processamento consulte os estados individuais.
 
 Os estados das tarefas são `pending`, `running`, `review`, `approved`, `failed` e `blocked`. Uma falha bloqueia todos os descendentes. `approved` significa revisão aprovada, testes do worktree aprovados, cherry-pick aplicado e testes de integração aprovados.
 
 Worktrees ficam em `.agent-runs/runs/<identificador-da-execução>/wt-<id>`. Cada execução tem seu próprio diretório e branches únicas; IDs de tarefas podem ser reutilizados. Os worktrees são preservados para inspeção. `status.json` e o plano enviado mostram a execução mais recente; o log do MCP é sobrescrito a cada submissão.
+
+Em timeout, o runner encerra e aguarda a árvore de subprocessos antes de retornar. No Windows usa `taskkill /T /F`; em sistemas POSIX usa um grupo de processos dedicado. Se não puder confirmar o encerramento, bloqueia a integração, mantém a reserva e requer inspeção manual dos processos antes de liberar `run.lock`.
 
 Se houver timeout ou exceção nos testes após o cherry-pick, o orquestrador tenta restaurar o código por um **novo commit de revert**. Isso preserva o histórico. Falha do revert ou do abort de cherry-pick bloqueia todas as tarefas restantes e exige intervenção manual; consulte o erro e `git status` antes de continuar.
 
@@ -149,3 +154,9 @@ Após encerramento abrupto:
 Para liberar um worktree antigo após inspecioná-lo, use `git worktree remove "CAMINHO_EXATO"`. O Git recusa worktrees sujos; preserve o trabalho antes de removê-los. As branches são mantidas e podem ser removidas manualmente quando não forem mais necessárias.
 
 Diagnóstico rápido: erro `not a git repository` exige executar na raiz Git com commit inicial; `Instale/autentique` exige conferir o PATH do processo MCP; falhas antes de gerar estado aparecem no log do MCP. Reinicie a sessão do aplicativo após mudar PATH ou `.mcp.json`.
+
+## Dependências e validação de alterações
+
+`requirements.txt` fixa a dependência direta; `requirements.lock.txt` fixa também as transitivas do ambiente validado, com `pywin32` restrito ao Windows. Use o lock na instalação e na CI. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
+
+A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Retomada automática após crash e orçamento de tokens/custo continuam fora do escopo deste protótipo; a reserva e a recuperação manual continuam obrigatórias nesses casos.

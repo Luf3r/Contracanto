@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 from mcp.server.fastmcp import FastMCP
-from orchestrator import ROOT, STORE, validate, reserve_run, release_run
+from orchestrator import ROOT, STORE, validate, reserve_run, release_run, write_json
 
 mcp = FastMCP('Claude Antigravity Orchestrator')
 
@@ -31,13 +31,15 @@ def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, test_comman
         plan_file = STORE / 'submitted-plan.json'
         plan_file.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding='utf-8')
         argv = [sys.executable, str(ROOT / 'orchestrator.py'), str(plan_file), '--parallel', str(parallel), '--retries', str(retries), '--reservation', token, '--test', *test]
-        kw = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' else {'start_new_session': True}
+        kw = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {'start_new_session': True}
         # Estado anterior não deve ser exibido como resultado da nova execução.
-        (STORE / 'status.json').write_text(json.dumps({'state': 'starting', 'statuses': {}}), encoding='utf-8')
+        write_json(STORE / 'status.json', {'state': 'starting', 'run_id': token, 'statuses': {}})
         with (STORE / 'run.log').open('w', encoding='utf-8') as log:
             proc = subprocess.Popen(argv, cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, **kw)
-    except Exception:
+    except Exception as error:
+        write_json(STORE / 'status.json', {'state': 'failed', 'run_id': token,
+                                         'statuses': {}, 'error': str(error)})
         release_run(token)
         raise
     (STORE/'pid.txt').write_text(str(proc.pid), encoding='utf-8')

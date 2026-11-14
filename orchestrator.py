@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import uuid
@@ -21,7 +22,7 @@ RUN_DIR = STORE
 
 
 class RecoveryRequired(RuntimeError):
-    """Operação Git não pôde ser desfeita; nenhuma outra tarefa deve integrar."""
+    """Estado Git/processos incerto; nenhuma outra tarefa deve integrar."""
 
 
 def reserve_run():
@@ -41,9 +42,32 @@ def release_run(token):
         path.unlink()
 
 
-def cmd(args, cwd=ROOT, timeout=1800, check=True):
-    p = subprocess.run(args, cwd=str(cwd), capture_output=True, text=True,
-                       timeout=timeout, encoding='utf-8', errors='replace')
+def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None):
+    options = ({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+               if os.name == 'nt' else {'start_new_session': True})
+    env = dict(os.environ, PYTHONIOENCODING='utf-8')
+    with subprocess.Popen(args, cwd=str(cwd), stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          encoding='utf-8', errors='replace', env=env, **options) as process:
+        try:
+            stdout, stderr = process.communicate(input_text, timeout=timeout)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            # Keep the parent alive until its descendants have been terminated.
+            try:
+                if os.name == 'nt':
+                    killed = subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                                            capture_output=True, timeout=30,
+                                            creationflags=subprocess.CREATE_NO_WINDOW)
+                    if killed.returncode:
+                        raise OSError('taskkill não confirmou o encerramento da árvore: ' + killed.stderr.decode(errors='replace')[-1000:])
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=30)
+            except Exception as error:
+                process.kill()
+                raise RecoveryRequired(f'Encerramento dos subprocessos não confirmado: {error}') from error
+            raise
+        p = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
     if check and p.returncode:
         raise RuntimeError(f'{args[0]} exited {p.returncode}: {p.stderr[-2000:]}')
     return p
@@ -51,6 +75,32 @@ def cmd(args, cwd=ROOT, timeout=1800, check=True):
 
 def git(*args, cwd=ROOT, check=True):
     return cmd(['git', *args], cwd=cwd, timeout=180, check=check)
+
+
+def changed_files(wt):
+    """Porcelain -z returns raw names; renames contain destination AND source."""
+    records = iter(git('status', '--porcelain', '-z', '-uall', cwd=wt).stdout.split('\0'))
+    paths = []
+    for record in records:
+        if not record:
+            continue
+        paths.append(record[3:])
+        if 'R' in record[:2] or 'C' in record[:2]:
+            paths.append(next(records))
+    return list(dict.fromkeys(paths))
+
+
+def run_agy(prompt, wt):
+    # NDJSON stdin avoids Windows command-line limits, including during repairs.
+    payload = json.dumps({'event': 'user', 'message': {'content': prompt}}, ensure_ascii=False) + '\n'
+    result = cmd(['agy', '--input-format', 'stream-json', '--output-format', 'stream-json',
+                  '--sandbox', '--mode', 'auto', '--print-timeout', '25m'],
+                 cwd=wt, timeout=1600, input_text=payload)
+    events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    results = [event['result'] for event in events if event.get('event') == 'result']
+    if len(results) != 1:
+        raise RuntimeError('Antigravity não retornou exatamente um resultado terminal')
+    return parse_json_output(json.dumps(results[0]), 'agy')
 
 
 def write_json(path, obj):
@@ -121,11 +171,9 @@ def run_executor(task, base, context):
               'Não acesse segredos. NÃO altere arquivos fora da lista files. '
               'Se houver conflito de escopo, reporte sem implementar.\n' +
               json.dumps({'task':task,'context':context}, ensure_ascii=False))
-    result = cmd(['agy', '-p', prompt, '--output-format', 'json', '--print-timeout', '25m'], cwd=wt, timeout=1600)
-    report = parse_json_output(result.stdout, 'agy')
+    report = run_agy(prompt, wt)
     # Verifica modificações fora do escopo, incluindo arquivos ainda não rastreados.
-    lines = git('status', '--porcelain', '-uall', cwd=wt).stdout.splitlines()
-    changed = [x[3:] for x in lines if len(x)>3]
+    changed = changed_files(wt)
     allowed = task.get('files', [])
     for f in changed:
         normalized = f.replace('\\', '/')
@@ -133,7 +181,7 @@ def run_executor(task, base, context):
             raise RuntimeError(f'Arquivo fora do escopo em {task["id"]}: {f}')
     if not changed:
         raise RuntimeError(f'Gemini não alterou arquivos em {task["id"]}')
-    git('add', '--', *changed, cwd=wt)
+    git('add', '--all', '--', '.', cwd=wt)
     git('-c', 'user.name=Agent Executor', '-c', 'user.email=agent@localhost', 'commit', '-m', f'agent: {task["id"]}', cwd=wt)
     commit = git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
     return {'task':task, 'commit':commit, 'worktree':str(wt), 'report':report}
@@ -144,7 +192,7 @@ def review(task, artifact, test_command):
     test = cmd(test_command, cwd=wt, timeout=600, check=False) if test_command else None
     test_output = (test.stdout + '\n' + test.stderr)[-10000:] if test else 'Nenhum comando de teste configurado'
     diff = git('show', '--format=medium', '--stat', 'HEAD', cwd=wt).stdout
-    patch = git('show', '--format=', 'HEAD', cwd=wt).stdout[:60000]
+    patch = git('show', '--format=', 'HEAD', cwd=wt).stdout
     prompt = ('Você é revisor de código. Verifique a task e o diff contra critérios de aceitação. '
               'Responda EXATAMENTE com uma palavra na primeira linha: APPROVED ou REJECTED. '
               'Nas linhas seguintes explique problemas encontrados. Testes não executados NÃO equivalem a testes aprovados. '
@@ -152,23 +200,51 @@ def review(task, artifact, test_command):
                      'patch':patch, 'executor_report':artifact['report'],
                      'test_exit_code':test.returncode if test else None,
                      'test_output':test_output}, ensure_ascii=False))
-    response = cmd(['claude', '-p', prompt, '--model', 'sonnet', '--output-format', 'json', '--max-turns', '1'], cwd=wt, timeout=900)
+    response = cmd(['claude', '-p', '--model', 'sonnet', '--output-format', 'json',
+                    '--max-turns', '1', '--tools', '', '--strict-mcp-config'],
+                   cwd=wt, timeout=900, input_text=prompt)
     verdict = parse_json_output(response.stdout, 'claude').strip()
-    approved = verdict.startswith('APPROVED') and (test is None or test.returncode == 0)
+    approved = verdict.splitlines()[0:1] == ['APPROVED'] and test is not None and test.returncode == 0
     return approved, verdict, test_output
 
 
 def execute(plan, max_workers, retries, tests, reservation=None):
     global RUN_DIR
     token = reservation or reserve_run()
+    owned = False
+    keep_lock = False
     try:
         if json.loads((STORE / 'run.lock').read_text(encoding='utf-8'))['token'] != token:
             raise RuntimeError('Reserva de execução inválida')
+        owned = True
         RUN_DIR = STORE / 'runs' / token
         RUN_DIR.mkdir(parents=True)
-        return _execute(plan, max_workers, retries, tests)
+        result = _execute(plan, max_workers, retries, tests)
+        state = json.loads((STORE / 'status.json').read_text(encoding='utf-8'))
+        keep_lock = state.get('recovery_required', False)
+        state['state'] = 'completed' if all(s == 'approved' for s in result.values()) else 'failed'
+        state['run_id'] = token
+        write_json(STORE / 'status.json', state)
+        return result
+    except (Exception, KeyboardInterrupt) as error:
+        if not owned:
+            raise
+        keep_lock = isinstance(error, RecoveryRequired)
+        path = STORE / 'status.json'
+        try:
+            state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'statuses': {}}
+        except (ValueError, OSError):
+            state = {'statuses': {}}
+        state.update(state='failed', run_id=token, error=str(error) or type(error).__name__,
+                     recovery_required=keep_lock)
+        for tid, value in state.get('statuses', {}).items():
+            if value in ('pending', 'running', 'review'):
+                state['statuses'][tid] = 'blocked'
+        write_json(path, state)
+        raise
     finally:
-        release_run(token)
+        if not keep_lock:
+            release_run(token)
 
 
 def _execute(plan, max_workers, retries, tests):
@@ -207,6 +283,7 @@ def _execute(plan, max_workers, retries, tests):
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             jobs = {pool.submit(run_executor, t, base, context):t for t in batch}
             artifacts=[]
+            recovery_error = None
             for future in concurrent.futures.as_completed(jobs):
                 t=jobs[future]
                 try:
@@ -216,6 +293,14 @@ def _execute(plan, max_workers, retries, tests):
                 except Exception as e:
                     statuses[t['id']]='failed'
                     details[t['id']]={'error':str(e)}
+                    if isinstance(e, RecoveryRequired):
+                        recovery_error = e
+        if recovery_error is not None:
+            for tid, state in statuses.items():
+                if state in ('pending', 'review', 'running'):
+                    statuses[tid] = 'blocked'
+            write_json(STORE/'status.json', {'statuses': statuses, 'details': details, 'recovery_required': True})
+            return statuses
         write_json(STORE/'status.json', {'statuses':statuses,'details':details})
         for artifact in artifacts:
             t = artifact['task']
@@ -244,6 +329,8 @@ def _execute(plan, max_workers, retries, tests):
                             integrated=cmd(tests, timeout=600, check=False)
                             if integrated.returncode:
                                 raise RuntimeError('Testes de integração falharam: ' + (integrated.stdout + integrated.stderr)[-2000:])
+                        except RecoveryRequired:
+                            raise
                         except Exception as integration_error:
                             try:
                                 revert = git('revert','--no-edit','HEAD',check=False)
@@ -258,16 +345,14 @@ def _execute(plan, max_workers, retries, tests):
                     if attempt == retries:
                         raise RuntimeError('Rejeitado após tentativas: '+feedback[-2000:])
                     wt=Path(artifact['worktree'])
-                    correction=cmd(['agy','-p','Corrija sua tarefa considerando a revisão a seguir. Não faça commit. Não modifique arquivos fora do escopo.\n'+feedback,
-                                    '--output-format','json','--print-timeout','25m'],cwd=wt,timeout=1600)
-                    artifact['report'] += '\nCorreção: '+parse_json_output(correction.stdout,'agy')
-                    dirty=git('status','--porcelain','-uall',cwd=wt).stdout.splitlines()
-                    modified=[x[3:] for x in dirty if len(x)>3]
+                    correction = run_agy('Corrija a tarefa abaixo considerando a revisão. Não faça commit/push/deploy. Não modifique arquivos fora de files.\n' + json.dumps({'task': t, 'review': feedback}, ensure_ascii=False), wt)
+                    artifact['report'] += '\nCorreção: ' + correction
+                    modified = changed_files(wt)
                     if modified:
                         for f in modified:
                             if not any(f == x.rstrip('/') or f.startswith(x.rstrip('/') + '/') for x in t.get('files', [])):
                                 raise RuntimeError('Correção fora de escopo: '+f)
-                        git('add','--',*modified,cwd=wt)
+                        git('add','--all','--','.',cwd=wt)
                         git('-c','user.name=Agent Executor','-c','user.email=agent@localhost','commit','-m',f'agent: repair {t["id"]}',cwd=wt)
                         # Tem que integrar a sequência inteira, não apenas o último commit.
                         # Faz squash da branch sobre base original no worktree.
@@ -282,7 +367,7 @@ def _execute(plan, max_workers, retries, tests):
                         for tid, state in statuses.items():
                             if state in ('pending', 'review', 'running'):
                                 statuses[tid] = 'blocked'
-                        write_json(STORE/'status.json', {'statuses':statuses,'details':details})
+                        write_json(STORE/'status.json', {'statuses':statuses,'details':details, 'recovery_required': True})
                         return statuses
                     break
             write_json(STORE/'status.json', {'statuses':statuses,'details':details})

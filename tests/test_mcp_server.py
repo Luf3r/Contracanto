@@ -32,3 +32,6 @@ class SubmissionTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     server.submit_plan(PLAN, test_command_json='["test"]')
                 self.assertFalse((store / 'run.lock').exists())
+                state = json.loads((store / 'status.json').read_text())
+                self.assertEqual(state['state'], 'failed')
+                self.assertIn('launch failed', state['error'])
