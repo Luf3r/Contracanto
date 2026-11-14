@@ -17,6 +17,9 @@ class GitIntegrationTests(unittest.TestCase):
     def test_keyboard_interrupt_restores_tree_with_revert_commit(self):
         self.assert_integration_failure_restores_tree(KeyboardInterrupt())
 
+    def test_stop_during_integration_restores_tree_with_revert_commit(self):
+        self.assert_integration_failure_restores_tree(o.RunCancelled('Encerramento solicitado'))
+
     def assert_integration_failure_restores_tree(self, error):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             root = Path(directory)
@@ -48,13 +51,13 @@ class GitIntegrationTests(unittest.TestCase):
                 stack.enter_context(patch.object(o, 'review', return_value=(True, 'APPROVED', '')))
                 stack.enter_context(patch.object(o, 'cmd', side_effect=error))
                 plan = {'tasks': [dict(id='A', description='Change', deps=[], files=['feature.txt'], acceptance=['Pass'])]}
-                if isinstance(error, KeyboardInterrupt):
-                    with self.assertRaises(KeyboardInterrupt):
+                if isinstance(error, (KeyboardInterrupt, o.RunCancelled)):
+                    with self.assertRaises(type(error)):
                         o.execute(plan, 1, 0, ['test'])
                 else:
                     self.assertEqual(o.execute(plan, 1, 0, ['test']), {'A': 'failed'})
             state = json.loads((store / 'status.json').read_text())
-            self.assertEqual(state['state'], 'failed')
+            self.assertEqual(state['state'], 'cancelled' if isinstance(error, o.RunCancelled) else 'failed')
             self.assertFalse(state.get('recovery_required', False))
             self.assertEqual(git('rev-parse', 'HEAD^{tree}').stdout.strip(), before)
             self.assertEqual(git('status', '--porcelain').stdout, '')

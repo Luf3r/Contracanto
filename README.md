@@ -122,7 +122,7 @@ O arquivo local não é versionado. Use `.mcp.example.json` como modelo em outra
 }
 ```
 
-Alternativamente, configure o MCP no ambiente local do Claude Code. O MCP de Chat e o da aba Code não são os mesmos. Reinicie a sessão local do Claude e verifique se aparecem as ferramentas `submit_plan`, `get_run_status` e `get_submitted_plan`.
+Alternativamente, configure o MCP no ambiente local do Claude Code. O MCP de Chat e o da aba Code não são os mesmos. Reinicie a sessão local do Claude e verifique se aparecem as ferramentas `submit_plan`, `stop_run`, `get_run_status` e `get_submitted_plan`.
 
 Peça ao Claude na aba Code:
 
@@ -141,6 +141,10 @@ Peça ao Claude na aba Code:
 
 ## Estado e recuperação
 
+Para encerrar o plano ativo pelo MCP, chame `stop_run()`. Você também pode passar o `run_id` obtido em `get_run_status()` para selecionar uma execução específica. Pelo terminal, execute `py orchestrator.py --stop` na raiz do projeto, em outra janela. As duas opções servem para planos iniciados pela CLI ou pelo MCP.
+
+O pedido retorna imediatamente. A reserva mostra `stop_requested: true` enquanto o worker encerra os comandos de modelo e testes. Operações Git em andamento chegam a um ponto seguro. Se o cancelamento interromper os testes de integração, o worker verifica o repositório e reverte o commit em teste quando for seguro. Tarefas já aprovadas mantêm seus commits. Consulte `get_run_status()` ou `.agent-runs/status.json` para confirmar o estado final `cancelled`. Se o plano já tiver terminado, vale o resultado registrado. Um encerramento incerto continua exigindo recuperação manual.
+
 CLI e MCP compartilham uma reserva exclusiva em `.agent-runs/run.lock`, criada antes de gravar o plano ou iniciar o processo. Uma segunda execução é recusada. A reserva é liberada ao término normal e em erros tratados com estado conhecido. Em falhas de recuperação Git ou encerramento incerto de subprocessos, `recovery_required: true` preserva a reserva para impedir novas execuções até inspeção manual. Interrupções abruptas também podem preservá-la.
 
 O status expõe o identificador público da execução. O worker usa uma credencial de uso único para assumir a reserva. Repetir a chamada do worker preserva o plano, o estado e a reserva da execução ativa.
@@ -149,9 +153,9 @@ Se a reserva for removida durante uma consulta de status, o MCP informa `Sem res
 
 As atualizações de estado substituem o JSON de forma atômica. Se uma consulta no Windows bloquear a substituição do JSON ou a remoção de `run.lock`, o processo tenta novamente por até um segundo. Antes de cada tentativa de remoção, ele confere a identidade da reserva. Se a primeira gravação de `starting` falhar, o diagnóstico da nova execução usa listas de tarefas e detalhes vazias. Uma recuperação já exigida mantém a reserva mesmo se houver erro ao salvar o estado final ou ao ler o estado da execução em curso.
 
-O estado global final é `completed` quando todas as tarefas são aprovadas, ou `failed`, inclusive em falhas de preparação; erros de preparação ficam em `error`, associados a `run_id`. CLI e MCP iniciam em `starting`, com estado novo antes da preparação, sem reutilizar tarefas ou detalhes da execução anterior; durante o processamento consulte os estados individuais.
+O estado global final é `completed` quando todas as tarefas são aprovadas, `cancelled` quando o worker confirma o encerramento solicitado, ou `failed` em caso de falha. Erros de preparação ficam em `error`, associados a `run_id`. CLI e MCP iniciam em `starting`, com estado novo antes da preparação, sem reutilizar tarefas ou detalhes da execução anterior; durante o processamento consulte os estados individuais.
 
-Os estados das tarefas são `pending`, `running`, `review`, `approved`, `failed` e `blocked`. Uma falha bloqueia todos os descendentes. `approved` significa revisão aprovada, testes do worktree aprovados, cherry-pick aplicado e testes de integração aprovados.
+Os estados das tarefas são `pending`, `running`, `review`, `approved`, `failed`, `blocked` e `cancelled`. Uma falha bloqueia todos os descendentes. `approved` significa revisão aprovada, testes do worktree aprovados, cherry-pick aplicado e testes de integração aprovados.
 
 Worktrees ficam em `.agent-runs/runs/<identificador-da-execução>/wt-<id>`. Cada execução tem seu próprio diretório e branches únicas; IDs de tarefas podem ser reutilizados. Os worktrees são preservados para inspeção. CLI e MCP atualizam `submitted-plan.json` de forma atômica, sob a reserva de execução, antes da preparação dos workers. `get_submitted_plan()` retorna esse plano, inclusive se a preparação falhar. Uma execução recusada por reserva ativa não substitui o plano existente. `status.json` e o plano salvo mostram a execução mais recente; o log do MCP é sobrescrito a cada submissão MCP e não é atualizado pela CLI.
 

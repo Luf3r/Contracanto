@@ -1,7 +1,10 @@
 import json
+import concurrent.futures
 from pathlib import Path
+import subprocess
 import tempfile
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +17,50 @@ PLAN = json.dumps({'tasks': [dict(id='A', description='Example', deps=[],
 
 
 class SubmissionTests(unittest.TestCase):
+    def test_stop_before_worker_claim_and_stale_request(self):
+        with tempfile.TemporaryDirectory(dir=o.STORE) as directory, \
+                patch.object(o, 'STORE', Path(directory)), patch.object(server, 'STORE', Path(directory)):
+            self.assertIn('Nenhuma execução', server.stop_run())
+            token = o.reserve_run()
+            run_id = o.reservation_id(token)
+            with patch.object(sys, 'argv', ['orchestrator.py', '--stop']):
+                o.main()
+            self.assertIn('solicitado', server.stop_run(run_id))
+            with patch.object(o, '_execute') as start, self.assertRaises(o.RunCancelled):
+                o.execute(json.loads(PLAN), 1, 0, ['test'], token)
+            start.assert_not_called()
+            self.assertEqual(json.loads((o.STORE / 'status.json').read_text())['state'], 'cancelled')
+            next_token = o.reserve_run()
+            self.assertIn('outra execução', server.stop_run(run_id))
+            self.assertNotIn('stop_requested', server.get_run_status())
+            o.release_run(next_token)
+
+    def test_stop_during_worker_command(self):
+        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+            store = Path(directory)
+            started = store / 'started'
+            def worker(*args):
+                program = 'import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); time.sleep(30)'
+                return o.cmd([sys.executable, '-c', program, str(started)], timeout=15, cancellable=True)
+
+            with patch.object(o, 'STORE', store), patch.object(server, 'STORE', store), \
+                    patch.object(o.shutil, 'which', return_value='tool'), \
+                    patch.object(o, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+                    patch.object(o, 'run_executor', side_effect=worker), \
+                    concurrent.futures.ThreadPoolExecutor(1) as pool:
+                run = pool.submit(o.execute, json.loads(PLAN), 1, 0, ['test'])
+                deadline = time.monotonic() + 5
+                while not started.exists() and time.monotonic() < deadline and not run.done():
+                    time.sleep(0.02)
+                self.assertTrue(started.exists())
+                self.assertIn('solicitado', server.stop_run())
+                with self.assertRaises(o.RunCancelled):
+                    run.result(timeout=5)
+                state = json.loads((store / 'status.json').read_text())
+                self.assertEqual(state['state'], 'cancelled')
+                self.assertEqual(state['statuses'], {'A': 'cancelled'})
+                self.assertFalse((store / 'run.lock').exists())
+
     def test_status_reports_pre_upgrade_reservation_without_legacy_credential(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             store = Path(directory)

@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -26,10 +27,45 @@ STORE = ROOT / '.agent-runs'
 STORE.mkdir(exist_ok=True)
 SAFE_ID = re.compile(r'^[A-Za-z0-9_-]{1,60}$')
 RUN_DIR = STORE
+STOP_FILE = None
 
 
 class RecoveryRequired(RuntimeError):
     """Estado Git/processos incerto; nenhuma outra tarefa deve integrar."""
+
+
+class RunCancelled(RuntimeError):
+    """O operador solicitou o encerramento desta execução."""
+
+
+def check_stop():
+    if STOP_FILE is not None and STOP_FILE.is_file():
+        raise RunCancelled('Execução encerrada a pedido do operador')
+
+
+def request_stop(run_id=None):
+    try:
+        record = json.loads((STORE / 'run.lock').read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return 'Nenhuma execução ativa.'
+    except json.JSONDecodeError:
+        return 'Reserva em criação ou incompleta. Consulte o status e tente novamente.'
+    active_id = record.get('run_id', '')
+    if run_id is not None and run_id != active_id:
+        return 'A reserva atual pertence a outra execução.'
+    if not record.get('supports_stop') or not re.fullmatch('[0-9a-f]{64}', active_id):
+        return 'Esta reserva não oferece encerramento cooperativo. Consulte o procedimento de recuperação.'
+    try:
+        state = json.loads((STORE / 'status.json').read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        state = {}
+    if state.get('run_id') == active_id and state.get('state') in ('completed', 'failed', 'cancelled'):
+        if state.get('recovery_required'):
+            return 'Execução finalizada com recuperação manual pendente.'
+        return 'Execução já finalizada.'
+    # The request may precede the worker's single-use mkdir or race a new run.
+    (STORE / f'stop-{active_id}').touch()
+    return f'Encerramento solicitado para {active_id}. Consulte get_run_status para confirmar o término.'
 
 
 def reserve_run():
@@ -37,7 +73,7 @@ def reserve_run():
     token = uuid.uuid4().hex
     try:
         with (STORE / 'run.lock').open('x', encoding='utf-8') as handle:
-            json.dump({'run_id': reservation_id(token), 'pid': os.getpid()}, handle)
+            json.dump({'run_id': reservation_id(token), 'pid': os.getpid(), 'supports_stop': True}, handle)
     except FileExistsError:
         raise RuntimeError('Já existe execução reservada; consulte get_run_status e o procedimento de recuperação') from None
     return token
@@ -73,7 +109,7 @@ def retry_permission_error(operation, *args):
             time.sleep(0.05)
 
 
-def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None):
+def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=False):
     options = ({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW | WindowsJob.creationflags}
                if os.name == 'nt' else {'start_new_session': True})
     env = dict(os.environ, PYTHONIOENCODING='utf-8')
@@ -81,14 +117,39 @@ def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None):
     # hold those pipes open if explicit termination failed.
     with contextlib.ExitStack() as processes, (WindowsJob() if os.name == 'nt' else contextlib.nullcontext()) as job:
         process = None
+        poll_stop = cancellable and STOP_FILE is not None
+        stdin = subprocess.PIPE
+        if poll_stop:
+            check_stop()
+            # Older Windows Pythons write pipe input synchronously in communicate.
+            # A file also allows retries while the child has not consumed its input.
+            stdin = subprocess.DEVNULL
+            if input_text is not None:
+                stdin = processes.enter_context(tempfile.TemporaryFile(mode='w+', encoding='utf-8'))
+                stdin.write(input_text)
+                stdin.seek(0)
+                input_text = None
         try:
-            process = subprocess.Popen(args, cwd=str(cwd), stdin=subprocess.PIPE,
+            process = subprocess.Popen(args, cwd=str(cwd), stdin=stdin,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                        encoding='utf-8', errors='replace', env=env, **options)
             processes.enter_context(process)
             if job is not None:
                 job.start(process.pid)
-            stdout, stderr = process.communicate(input_text, timeout=timeout)
+            if poll_stop:
+                deadline = time.monotonic() + timeout
+                while True:
+                    check_stop()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(args, timeout)
+                    try:
+                        stdout, stderr = process.communicate(input_text, timeout=min(0.25, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            else:
+                stdout, stderr = process.communicate(input_text, timeout=timeout)
             if job is not None:
                 job.terminate()
         except (Exception, KeyboardInterrupt) as error:
@@ -197,7 +258,7 @@ def run_tests(command, wt, expected_head, recovery=False, expected_branch=None):
     """Tests must preserve the commit, branch (including detached HEAD), and files."""
     expected_branch = check_revision(wt, expected_head, expected_branch, recovery)
     try:
-        result = cmd(command, cwd=wt, timeout=600, check=False)
+        result = cmd(command, cwd=wt, timeout=600, check=False, cancellable=True)
     except RecoveryRequired:
         # A dirty worktree must not hide an unconfirmed process termination.
         raise
@@ -213,7 +274,7 @@ def run_agy(prompt, wt):
     payload = json.dumps({'event': 'user', 'message': {'content': prompt}}, ensure_ascii=False) + '\n'
     result = cmd(['agy', '--input-format', 'stream-json', '--output-format', 'stream-json',
                   '--sandbox', '--mode', 'auto', '--print-timeout', '25m'],
-                 cwd=wt, timeout=1600, input_text=payload)
+                 cwd=wt, timeout=1600, input_text=payload, cancellable=True)
     events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
     results = [event['result'] for event in events if event.get('event') == 'result']
     if len(results) != 1:
@@ -289,6 +350,7 @@ def make_worktree(task, base):
 
 
 def run_executor(task, base, context):
+    check_stop()
     wt = make_worktree(task, base)
     branch = branch_ref(wt)
     prompt = ('Você está implementando UMA tarefa no Git worktree atual. '
@@ -333,7 +395,7 @@ def review(task, artifact, test_command):
                      'test_output':test_output}, ensure_ascii=False))
     response = cmd(['claude', '-p', '--model', 'sonnet', '--output-format', 'json',
                     '--max-turns', '1', '--tools', '', '--strict-mcp-config'],
-                   cwd=wt, timeout=900, input_text=prompt)
+                   cwd=wt, timeout=900, input_text=prompt, cancellable=True)
     verdict = parse_json_output(response.stdout, 'claude').strip()
     approved = verdict.splitlines()[0:1] == ['APPROVED'] and test is not None and test.returncode == 0
     if test is not None and test.returncode:
@@ -342,7 +404,7 @@ def review(task, artifact, test_command):
 
 
 def execute(plan, max_workers, retries, tests, reservation=None):
-    global RUN_DIR
+    global RUN_DIR, STOP_FILE
     token = reservation or reserve_run()
     run_id = reservation_id(token)
     if json.loads((STORE / 'run.lock').read_text(encoding='utf-8')).get('run_id') != run_id:
@@ -356,6 +418,7 @@ def execute(plan, max_workers, retries, tests, reservation=None):
     except (OSError, KeyboardInterrupt) as error:
         raise RecoveryRequired('Não foi possível assumir a reserva; inspecione run.lock e o diretório da execução') from error
     RUN_DIR = run_dir
+    STOP_FILE = STORE / f'stop-{run_id}'
     keep_lock = False
     state_initialized = False
     try:
@@ -367,6 +430,7 @@ def execute(plan, max_workers, retries, tests, reservation=None):
             plan = json.loads(plan.read_text(encoding='utf-8'))
         # Publish the current CLI or MCP plan only after proving lock ownership.
         write_json(STORE / 'submitted-plan.json', plan)
+        check_stop()
         result = _execute(plan, max_workers, retries, tests)
         # Until the final state is read, recovery may already be pending.
         keep_lock = True
@@ -387,14 +451,16 @@ def execute(plan, max_workers, retries, tests, reservation=None):
             keep_lock = True
         # A later persistence error must never clear an earlier recovery flag.
         keep_lock = keep_lock or state.get('recovery_required', False)
-        state.update(state='failed', run_id=run_id, error=str(error) or type(error).__name__,
+        cancelled = isinstance(error, RunCancelled) and not keep_lock
+        state.update(state='cancelled' if cancelled else 'failed', run_id=run_id, error=str(error) or type(error).__name__,
                      recovery_required=keep_lock)
         for tid, value in state.get('statuses', {}).items():
             if value in ('pending', 'running', 'review'):
-                state['statuses'][tid] = 'blocked'
+                state['statuses'][tid] = 'cancelled' if cancelled else 'blocked'
         write_json(path, state)
         raise
     finally:
+        STOP_FILE = None
         if not keep_lock:
             release_run(token)
 
@@ -441,6 +507,7 @@ def _run_tasks(plan, max_workers, retries, tests, target):
             if len(batch) >= max_workers:
                 break
         target.verify()
+        check_stop()
         base = target.head
         context = 'Base do código: ' + base
         if plan.get('goal'):
@@ -462,6 +529,8 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                         artifact = future.result()
                         statuses[t['id']]='review'
                         artifacts.append(artifact)
+                    except RunCancelled:
+                        statuses[t['id']] = 'cancelled'
                     except Exception as e:
                         statuses[t['id']]='failed'
                         details[t['id']]={'error':str(e)}
@@ -492,16 +561,19 @@ def _run_tasks(plan, max_workers, retries, tests, target):
             write_json(STORE/'status.json', {'statuses': statuses, 'details': details, 'recovery_required': True})
             return statuses
         write_json(STORE/'status.json', {'statuses':statuses,'details':details})
+        check_stop()
         for artifact in artifacts:
             t = artifact['task']
             details[t['id']] = {'worktree': artifact['worktree'], 'commit': artifact['commit']}
             feedback=''
             for attempt in range(retries+1):
                 try:
+                    check_stop()
                     check_scope(t, Path(artifact['worktree']), base)
                     ok, feedback, _ = review(t, artifact, tests)
                     if ok:
                         target.verify()
+                        check_stop()
                         try:
                             applied=git('cherry-pick', artifact['commit'], check=False)
                         except (Exception, KeyboardInterrupt) as error:
@@ -528,6 +600,7 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                         try:
                             integrated=run_tests(tests, ROOT, integrated_head, recovery=True,
                                                  expected_branch=target.branch)
+                            check_stop()
                             if integrated.returncode:
                                 raise RuntimeError('Testes de integração falharam: ' + (integrated.stdout + integrated.stderr)[-2000:])
                         except RecoveryRequired:
@@ -546,7 +619,7 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                                 raise RecoveryRequired(f'Não foi possível identificar o HEAD após revert: {error}') from error
                             check_revision(ROOT, reverted_head, target.branch, recovery=True)
                             target.head = reverted_head
-                            if isinstance(integration_error, KeyboardInterrupt):
+                            if isinstance(integration_error, (KeyboardInterrupt, RunCancelled)):
                                 raise
                             raise RuntimeError(f'Integração revertida: {integration_error}') from integration_error
                         target.head = integrated_head
@@ -570,6 +643,8 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                         git('reset','--soft',original_base,cwd=wt)
                         git('-c','user.name=Agent Executor','-c','user.email=agent@localhost','commit','-m',f'agent: {t["id"]} revised',cwd=wt)
                         artifact['commit']=git('rev-parse','HEAD',cwd=wt).stdout.strip()
+                except RunCancelled:
+                    raise
                 except Exception as e:
                     statuses[t['id']]='failed'
                     details[t['id']].update(error=str(e), review=feedback)
@@ -595,12 +670,17 @@ def _run_tasks(plan, max_workers, retries, tests, target):
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('plan', type=Path)
+    action = p.add_mutually_exclusive_group(required=True)
+    action.add_argument('plan', type=Path, nargs='?')
+    action.add_argument('--stop', action='store_true', help='Solicita o encerramento da execução ativa')
     p.add_argument('--parallel',type=int,default=3)
     p.add_argument('--retries',type=int,default=2)
     p.add_argument('--reservation', help=argparse.SUPPRESS)
     p.add_argument('--test',nargs=argparse.REMAINDER,default=None,help='Última opção: comando e todos os argumentos de teste')
     args=p.parse_args()
+    if args.stop:
+        print(request_stop())
+        return
     if args.parallel < 1 or args.parallel > 8 or args.retries not in range(4):
         p.error('parallel deve ser 1..8, retries 0..3')
     if args.reservation:
@@ -613,4 +693,7 @@ def main():
         sys.exit(1)
 
 if __name__=='__main__':
-    main()
+    try:
+        main()
+    except RunCancelled as error:
+        sys.exit(str(error))

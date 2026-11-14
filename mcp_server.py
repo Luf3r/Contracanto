@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 from mcp.server.fastmcp import FastMCP
-from orchestrator import ROOT, STORE, validate, reserve_run, release_run, reservation_id, write_json
+from orchestrator import ROOT, STORE, validate, reserve_run, release_run, request_stop, reservation_id, write_json
 
 mcp = FastMCP('Contracanto')
 
@@ -55,6 +55,11 @@ def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, test_comman
     return message
 
 @mcp.tool()
+def stop_run(run_id: str | None = None) -> str:
+    """Solicita o encerramento da execução ativa. Passe o run_id do status para selecionar uma execução específica."""
+    return request_stop(run_id)
+
+@mcp.tool()
 def get_run_status() -> str:
     """Retorna status persistido das tasks e as últimas linhas dos logs da execução."""
     path = STORE / 'status.json'
@@ -64,7 +69,10 @@ def get_run_status() -> str:
     reservation = STORE / 'run.lock'
     try:
         record = json.loads(reservation.read_text(encoding='utf-8'))
-        lock = json.dumps({key: record[key] for key in ('run_id', 'pid') if key in record})
+        public = {key: record[key] for key in ('run_id', 'pid') if key in record}
+        if record.get('supports_stop') and (STORE / f"stop-{record['run_id']}").is_file():
+            public['stop_requested'] = True
+        lock = json.dumps(public)
         # Older workers used their credential as their public run_id too.
         if legacy_token := record.get('token'):
             public_id = reservation_id(legacy_token)
