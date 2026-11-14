@@ -1,5 +1,6 @@
 """Git real; somente os CLIs pagos e o resultado dos testes são substituídos."""
 import contextlib
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,6 +12,12 @@ import orchestrator as o
 
 class GitIntegrationTests(unittest.TestCase):
     def test_timeout_restores_tree_with_revert_commit(self):
+        self.assert_integration_failure_restores_tree(subprocess.TimeoutExpired(['test'], 600))
+
+    def test_keyboard_interrupt_restores_tree_with_revert_commit(self):
+        self.assert_integration_failure_restores_tree(KeyboardInterrupt())
+
+    def assert_integration_failure_restores_tree(self, error):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             root = Path(directory)
             def git(*args, cwd=None, check=True):
@@ -38,9 +45,16 @@ class GitIntegrationTests(unittest.TestCase):
                 stack.enter_context(patch.object(o.shutil, 'which', return_value='tool'))
                 stack.enter_context(patch.object(o, 'run_executor', side_effect=executor))
                 stack.enter_context(patch.object(o, 'review', return_value=(True, 'APPROVED', '')))
-                stack.enter_context(patch.object(o, 'cmd', side_effect=subprocess.TimeoutExpired(['test'], 600)))
-                statuses = o.execute({'tasks': [dict(id='A', description='Change', deps=[], files=['feature.txt'], acceptance=['Pass'])]}, 1, 0, ['test'])
-            self.assertEqual(statuses, {'A': 'failed'})
+                stack.enter_context(patch.object(o, 'cmd', side_effect=error))
+                plan = {'tasks': [dict(id='A', description='Change', deps=[], files=['feature.txt'], acceptance=['Pass'])]}
+                if isinstance(error, KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        o.execute(plan, 1, 0, ['test'])
+                else:
+                    self.assertEqual(o.execute(plan, 1, 0, ['test']), {'A': 'failed'})
+            state = json.loads((store / 'status.json').read_text())
+            self.assertEqual(state['state'], 'failed')
+            self.assertFalse(state.get('recovery_required', False))
             self.assertEqual(git('rev-parse', 'HEAD^{tree}').stdout.strip(), before)
             self.assertEqual(git('status', '--porcelain').stdout, '')
             self.assertEqual(git('rev-list', '--count', 'HEAD').stdout.strip(), '3')

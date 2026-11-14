@@ -217,6 +217,9 @@ def execute(plan, max_workers, retries, tests, reservation=None):
         if json.loads((STORE / 'run.lock').read_text(encoding='utf-8'))['token'] != token:
             raise RuntimeError('Reserva de execução inválida')
         owned = True
+        # CLI e MCP começam com estado próprio antes de qualquer preparação.
+        write_json(STORE / 'status.json', {'state': 'starting', 'run_id': token,
+                                         'statuses': {}, 'details': {}})
         RUN_DIR = STORE / 'runs' / token
         RUN_DIR.mkdir(parents=True)
         result = _execute(plan, max_workers, retries, tests)
@@ -312,14 +315,14 @@ def _execute(plan, max_workers, retries, tests):
                     if ok:
                         try:
                             applied=git('cherry-pick', artifact['commit'], check=False)
-                        except Exception as error:
+                        except (Exception, KeyboardInterrupt) as error:
                             # O comando pode ter aplicado o commit antes de perdermos
                             # seu resultado. Não é seguro integrar outra tarefa.
                             raise RecoveryRequired(f'Resultado do cherry-pick desconhecido: {error}') from error
                         if applied.returncode:
                             try:
                                 aborted = git('cherry-pick','--abort', check=False)
-                            except Exception as error:
+                            except (Exception, KeyboardInterrupt) as error:
                                 raise RecoveryRequired(f'Falha ao executar abort de cherry-pick: {error}') from error
                             if aborted.returncode:
                                 raise RecoveryRequired('Falha ao abortar cherry-pick; revisão manual necessária')
@@ -331,13 +334,15 @@ def _execute(plan, max_workers, retries, tests):
                                 raise RuntimeError('Testes de integração falharam: ' + (integrated.stdout + integrated.stderr)[-2000:])
                         except RecoveryRequired:
                             raise
-                        except Exception as integration_error:
+                        except (Exception, KeyboardInterrupt) as integration_error:
                             try:
                                 revert = git('revert','--no-edit','HEAD',check=False)
-                            except Exception as error:
+                            except (Exception, KeyboardInterrupt) as error:
                                 raise RecoveryRequired(f'Falha ao executar revert: {error}') from error
                             if revert.returncode:
                                 raise RecoveryRequired('Testes falharam e o revert automático também; revisão manual necessária')
+                            if isinstance(integration_error, KeyboardInterrupt):
+                                raise
                             raise RuntimeError(f'Integração revertida: {integration_error}') from integration_error
                         statuses[t['id']]='approved'
                         details[t['id']].update(commit=artifact['commit'], review=feedback)

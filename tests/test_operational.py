@@ -77,6 +77,49 @@ class OperationalTests(unittest.TestCase):
             self.assertIn('PATH', state['error'])
             self.assertFalse((store / 'run.lock').exists())
 
+    def test_preflight_failure_discards_previous_run_results(self):
+        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+            store = Path(directory)
+            previous = dict(state='completed', run_id='old', statuses={'OLD': 'approved'},
+                            details={'OLD': {'commit': 'old-commit'}}, recovery_required=True)
+            (store / 'status.json').write_text(json.dumps(previous))
+            with patch.object(o, 'STORE', store), patch.object(o.shutil, 'which', return_value=None):
+                with self.assertRaises(RuntimeError):
+                    o.execute(dict(tasks=[task(['a'])]), 1, 0, ['test'])
+            state = json.loads((store / 'status.json').read_text())
+            self.assertNotEqual(state['run_id'], 'old')
+            self.assertEqual(state['state'], 'failed')
+            self.assertEqual(state['statuses'], {})
+            self.assertEqual(state['details'], {})
+            self.assertFalse(state['recovery_required'])
+            self.assertFalse((store / 'run.lock').exists())
+
+    def test_interrupted_git_integration_preserves_reservation(self):
+        for operation in ('cherry-pick', 'revert'):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+                store = Path(directory)
+                current = task(['a'])
+                def git(*args, **kwargs):
+                    if args[0] == operation:
+                        raise KeyboardInterrupt
+                    return subprocess.CompletedProcess(args, 0, 'base' if args[0] == 'rev-parse' else '', '')
+                artifact = dict(task=current, commit='commit', worktree='.', report='done')
+                with patch.object(o, 'STORE', store), patch.object(o, 'git', side_effect=git), \
+                        patch.object(o.shutil, 'which', return_value='tool'), \
+                        patch.object(o, 'run_executor', return_value=artifact), \
+                        patch.object(o, 'review', return_value=(True, 'APPROVED', '')), \
+                        patch.object(o, 'cmd', side_effect=RuntimeError('integration failed')):
+                    try:
+                        o.execute(dict(tasks=[current]), 1, 0, ['test'])
+                    except KeyboardInterrupt:
+                        self.fail('Interrupção Git escapou sem exigir recuperação')
+                    self.assertTrue((store / 'run.lock').exists())
+                    state = json.loads((store / 'status.json').read_text())
+                    self.assertTrue(state['recovery_required'])
+                    self.assertEqual(state['statuses'], {'A': 'failed'})
+                    with self.assertRaises(RuntimeError):
+                        o.reserve_run()
+
     def test_executor_accepts_spaces_unicode_and_rename(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             root = Path(directory)

@@ -134,7 +134,7 @@ Peça ao Claude na aba Code:
 
 CLI e MCP compartilham uma reserva exclusiva em `.agent-runs/run.lock`, criada antes de gravar o plano ou iniciar o processo. Uma segunda execução é recusada. A reserva é liberada ao término normal e em erros tratados com estado conhecido. Em falhas de recuperação Git ou encerramento incerto de subprocessos, `recovery_required: true` preserva a reserva para impedir novas execuções até inspeção manual. Interrupções abruptas também podem preservá-la.
 
-O estado global final é `completed` quando todas as tarefas são aprovadas, ou `failed`, inclusive em falhas de preparação; erros de preparação ficam em `error`, associados a `run_id`. A submissão MCP inicia em `starting`; durante o processamento consulte os estados individuais.
+O estado global final é `completed` quando todas as tarefas são aprovadas, ou `failed`, inclusive em falhas de preparação; erros de preparação ficam em `error`, associados a `run_id`. CLI e MCP iniciam em `starting`, com estado novo antes da preparação, sem reutilizar tarefas ou detalhes da execução anterior; durante o processamento consulte os estados individuais.
 
 Os estados das tarefas são `pending`, `running`, `review`, `approved`, `failed` e `blocked`. Uma falha bloqueia todos os descendentes. `approved` significa revisão aprovada, testes do worktree aprovados, cherry-pick aplicado e testes de integração aprovados.
 
@@ -142,7 +142,7 @@ Worktrees ficam em `.agent-runs/runs/<identificador-da-execução>/wt-<id>`. Cad
 
 Em timeout, o runner encerra e aguarda a árvore de subprocessos antes de retornar. No Windows usa `taskkill /T /F`; em sistemas POSIX usa um grupo de processos dedicado. Se não puder confirmar o encerramento, bloqueia a integração, mantém a reserva e requer inspeção manual dos processos antes de liberar `run.lock`.
 
-Se houver timeout ou exceção nos testes após o cherry-pick, o orquestrador tenta restaurar o código por um **novo commit de revert**. Isso preserva o histórico. Falha do revert ou do abort de cherry-pick bloqueia todas as tarefas restantes e exige intervenção manual; consulte o erro e `git status` antes de continuar.
+Se houver timeout, exceção ou `Ctrl+C` nos testes após o cherry-pick, o orquestrador tenta restaurar o código por um **novo commit de revert**. Isso preserva o histórico. Após um revert bem-sucedido, `Ctrl+C` encerra a execução com estado `failed`. Falha ou interrupção durante cherry-pick, revert ou abort que deixe o resultado Git incerto preserva a reserva e exige intervenção manual; consulte o erro e `git status` antes de continuar.
 
 Após encerramento abrupto:
 
