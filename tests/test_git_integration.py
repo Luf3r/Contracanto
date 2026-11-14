@@ -40,6 +40,7 @@ class GitIntegrationTests(unittest.TestCase):
                 git('commit', '-m', 'feature', cwd=wt)
                 return dict(task=task, commit=git('rev-parse', 'HEAD', cwd=wt).stdout.strip(), worktree=str(wt), report='done')
             with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.object(o, 'ROOT', root))
                 stack.enter_context(patch.object(o, 'STORE', store))
                 stack.enter_context(patch.object(o, 'git', side_effect=git))
                 stack.enter_context(patch.object(o.shutil, 'which', return_value='tool'))

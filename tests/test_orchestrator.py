@@ -16,6 +16,12 @@ def task(tid, deps=()):
 
 
 class RegressionTests(unittest.TestCase):
+    def test_rejects_ids_that_differ_only_by_case(self):
+        for first, second in [('A', 'a'), ('Task_01', 'task_01')]:
+            with self.subTest(ids=(first, second)):
+                with self.assertRaises(ValueError):
+                    o.validate({'tasks': [task(first), task(second)]})
+
     def test_cli_forwards_test_options(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             plan = Path(directory) / 'plan.json'

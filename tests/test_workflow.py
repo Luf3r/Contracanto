@@ -22,7 +22,7 @@ else:
     prompt=json.loads(text)['message']['content']
     data=json.loads(prompt.split('\\n',1)[1])
     task=data['task']
-    content='bad\\n' if task['id']=='A' and 'context' in data else 'ok\\n'
+    content='bad\\n' if task['id']=='A' and 'review' not in data else 'ok\\n'
     Path(task['files'][0]).write_text(content,encoding='utf-8')
     print(json.dumps({'event':'result','result':{'status':'SUCCESS','response':'done'}}))
 '''
@@ -30,6 +30,12 @@ else:
 
 class WorkflowTests(unittest.TestCase):
     def test_parallel_dependencies_and_repair_integrate_with_real_git(self):
+        self.run_workflow()
+
+    def test_goal_reaches_implementation_review_and_repair(self):
+        self.run_workflow(goal='Preservar compatibilidade e documentação em português.')
+
+    def run_workflow(self, goal=None):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             root = Path(directory)
             original_cmd = o.cmd
@@ -46,22 +52,31 @@ class WorkflowTests(unittest.TestCase):
             store = root / '.agent-runs'
             store.mkdir()
             barrier = threading.Barrier(2)
+            prompts = []
             def command(args, **kwargs):
                 kwargs.setdefault('cwd', root)
                 if args[0] in ('agy', 'claude'):
+                    prompt = kwargs['input_text']
                     if args[0] == 'agy':
-                        data = json.loads(json.loads(kwargs['input_text'])['message']['content'].split('\n', 1)[1])
-                        if 'context' in data and data['task']['id'] in ('A', 'B'):
+                        prompt = json.loads(prompt)['message']['content']
+                    data = json.loads(prompt.split('\n', 1)[1])
+                    stage = 'review' if args[0] == 'claude' else ('repair' if 'review' in data else 'implementation')
+                    prompts.append((stage, data))
+                    if args[0] == 'agy':
+                        if stage == 'implementation' and data['task']['id'] in ('A', 'B'):
                             barrier.wait(timeout=10)
                     args = [sys.executable, str(root / 'fake_cli.py'), *args]
                 return original_cmd(args, **kwargs)
             tasks = [dict(id=tid, description='Create file', deps=deps, files=[filename], acceptance=['Contains ok'])
                      for tid, deps, filename in [('A', [], 'ação espaço.txt'), ('B', [], 'B.txt'), ('C', ['A', 'B'], 'C.txt')]]
             with contextlib.ExitStack() as stack:
-                for name, value in [('STORE', store), ('git', git), ('cmd', command)]:
+                for name, value in [('ROOT', root), ('STORE', store), ('git', git), ('cmd', command)]:
                     stack.enter_context(patch.object(o, name, value))
                 stack.enter_context(patch.object(o.shutil, 'which', return_value='test-cli'))
-                states = o.execute({'tasks': tasks}, 2, 1, [sys.executable, 'check.py'])
+                plan = {'tasks': tasks}
+                if goal is not None:
+                    plan['goal'] = goal
+                states = o.execute(plan, 2, 1, [sys.executable, 'check.py'])
             self.assertEqual(states, {'A': 'approved', 'B': 'approved', 'C': 'approved'})
             self.assertEqual(json.loads((store / 'status.json').read_text())['state'], 'completed')
             self.assertIn('revised', git('log', '--oneline').stdout)
@@ -70,3 +85,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(git('status', '--porcelain').stdout, '')
             for wt in (store / 'runs').glob('*/wt-*'):
                 git('worktree', 'remove', str(wt))
+            if goal is not None:
+                self.assertEqual({stage for stage, _ in prompts}, {'implementation', 'review', 'repair'})
+                for stage, data in prompts:
+                    with self.subTest(stage=stage, task=data['task']['id']):
+                        self.assertIn(goal, data.get('context', ''))

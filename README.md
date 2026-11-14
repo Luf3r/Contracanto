@@ -1,4 +1,6 @@
-# Claude Desktop → MCP → Python → Antigravity CLI
+# Contracanto
+
+Claude planeja e revisa. Antigravity implementa cada tarefa em um worktree Git. Um servidor MCP em Python coordena os dois e integra as mudanças após a revisão e os testes.
 
 **Protótipo de integração local para Windows**, com regressões automatizadas e smoke local anterior. Cada máquina precisa validar suas credenciais e permissões. Não é solução de produção.
 
@@ -61,7 +63,7 @@ Os testes usam `unittest`, incluído no Python, e Git local. Não chamam os CLIs
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Há regressões de parsing da CLI, escopo com Unicode/espaços/renomeações, prompts grandes por stdin, estado terminal, reserva de execução e rollback. Há testes com Git e subprocessos reais para encerramento de descendentes por timeout, execução paralela, dependências e rejeição seguida de correção e integração. Apenas os modelos são substituídos nesses testes. A CI executa a suíte e `pip check`. No Windows, a verificação de timeout usa `taskkill /T /F`; ambientes que bloqueiem esse comando impedem a confirmação do encerramento e exigem recuperação manual.
+Há regressões de parsing da CLI, IDs que diferem apenas por maiúsculas/minúsculas, escopo com Unicode/espaços/renomeações, prompts grandes por stdin, estado terminal, reserva de execução e rollback. Há testes com Git e subprocessos reais para encerramento de descendentes por timeout, execução paralela, dependências e rejeição seguida de correção e integração. Os modelos são simulados; os testes de recuperação também injetam falhas operacionais, incluindo erros de leitura do Git após os testes de integração. A CI executa a suíte e `pip check`. No Windows, os testes cobrem também encerramento após a saída do processo pai, indisponibilidade de `taskkill`, falha de associação ao Job Object e isolamento entre comandos paralelos.
 
 Para testar os CLIs reais, use uma cópia descartável deste projeto com Git limpo, autenticações ativas e permissões adequadas. O smoke cria apenas `smoke.txt` e **consome chamadas dos modelos**:
 
@@ -73,13 +75,13 @@ O processo deve retornar código 0 e a task `smoke` deve terminar `approved`. O 
 
 ## Formato do plano
 
-O plano é um objeto JSON com `tasks` (1 a 100 tarefas). `goal` é contexto descritivo opcional. Cada tarefa exige:
+O plano é um objeto JSON com `tasks` (1 a 100 tarefas). `goal` é contexto descritivo opcional, enviado ao executor, ao revisor e em cada tentativa de correção. Cada tarefa exige:
 
 | Campo | Contrato |
 | --- | --- |
-| `id` | String única, 1 a 60 caracteres: letras ASCII, números, `_` ou `-` |
+| `id` | String única sem distinguir maiúsculas/minúsculas, 1 a 60 caracteres: letras ASCII, números, `_` ou `-`. IDs como `A` e `a` não podem coexistir no mesmo plano, em nenhuma plataforma |
 | `description` | String não vazia com a instrução de implementação |
-| `deps` | Lista de IDs existentes; pode ser vazia; sem autorreferência ou ciclos |
+| `deps` | Lista de IDs existentes, com a grafia exata declarada em `id`; pode ser vazia; sem autorreferência ou ciclos |
 | `files` | Lista não vazia de arquivos ou diretórios relativos, usando `/` |
 | `acceptance` | Lista não vazia de strings com critérios verificáveis |
 
@@ -97,6 +99,12 @@ No MCP, tanto o plano quanto o comando de teste são strings contendo JSON. Exem
 ```
 
 O comando é uma lista de argumentos executada sem shell. Operadores como `&&`, pipes e redirecionamentos não são interpretados. `parallel` aceita 1 a 8; `retries`, 0 a 3 e controla correções após rejeição da revisão, não falhas de infraestrutura.
+
+Se os testes do worktree falharem, o executor recebe o parecer do revisor, o código de saída e o trecho final da saída dos testes na tentativa de correção. Se as tentativas se esgotarem, consulte o diagnóstico em `details.<id>.review` e o resumo em `details.<id>.error` no status da tarefa.
+
+O comando de testes deve preservar o commit atual, a branch ativa (ou o estado de HEAD destacado) e deixar o Git limpo. Trocar de branch mesmo mantendo o mesmo commit, alterar arquivos rastreados ou criar arquivos não ignorados impede a aprovação, mesmo com código de saída 0. Artefatos ignorados pelo Git, como caches, são permitidos. No worktree, a tarefa falha e as alterações ficam disponíveis para inspeção. Na branch de destino, mudanças de branch, alterações ou commits feitos pelos testes exigem recuperação manual: a reserva é mantida e nenhuma outra tarefa integra, inclusive se o comando falhar ou sofrer timeout. Não há limpeza destrutiva automática desses arquivos.
+
+Merge, cherry-pick, revert, rebase, `git am` e bisect em andamento também impedem a aprovação, inclusive quando `git status --porcelain` está vazio. Se os testes de integração deixarem uma dessas operações aberta na branch de destino, a reserva permanece ativa para recuperação manual.
 
 ## Conectar ao Claude Desktop na aba Code
 Edite o `.mcp.json` **na raiz do repositório**, usando o caminho absoluto do Python do venv e o caminho absoluto do servidor. Exemplo (substituir USUARIO e PROJETO):
@@ -122,8 +130,9 @@ Peça ao Claude na aba Code:
 
 ## Comportamento e limitações
 - O Claude cria o grafo de tarefas e envia pelo MCP. A fila é executada por Python, chamando `agy` em worktrees locais isolados.
-- O Claude Code CLI revisa o patch completo usando explicitamente o alias `sonnet`, sem ferramentas internas e sem carregar servidores MCP. Prompts seguem por stdin para evitar o limite de argumentos do Windows. Somente a primeira linha exata `APPROVED`, com testes executados e aprovados, permite integrar.
+- O Claude Code CLI revisa o patch usando o alias `sonnet`, sem ferramentas internas e sem carregar servidores MCP. O revisor recebe os diffs de texto e os patches binários no formato aplicável do Git. Para um critério que depende do conteúdo de uma imagem ou de outro binário, inclua um teste específico desse conteúdo. Prompts seguem por stdin para evitar o limite de argumentos do Windows. A aprovação exige o veredito `APPROVED` na primeira linha e testes aprovados.
 - Tarefas independentes, que não anunciam ownership conflitante, podem rodar em paralelo; a integração ocorre sequencialmente.
+- Após cada implementação ou correção, o orquestrador confere a branch atribuída ao worktree e o commit esperado antes de registrar as mudanças. Uma troca de branch no mesmo commit também faz a tarefa falhar. O escopo é conferido pelo diff completo entre a base e o candidato antes de cada revisão, incluindo origem e destino de renomeações.
 - Falhas de cherry-pick param a tarefa. Não faz deploy, push ou exclusões automáticas de worktrees.
 - `get_run_status` precisa ser consultado; o aplicativo Claude não recebe notificação push de término.
 - Não há retomada após desligar o processo, limitação de custos/tokens, isolamento forte de execução ou fila transacional. Não use em repositórios reais até adicionar esses recursos.
@@ -134,19 +143,31 @@ Peça ao Claude na aba Code:
 
 CLI e MCP compartilham uma reserva exclusiva em `.agent-runs/run.lock`, criada antes de gravar o plano ou iniciar o processo. Uma segunda execução é recusada. A reserva é liberada ao término normal e em erros tratados com estado conhecido. Em falhas de recuperação Git ou encerramento incerto de subprocessos, `recovery_required: true` preserva a reserva para impedir novas execuções até inspeção manual. Interrupções abruptas também podem preservá-la.
 
+O status expõe o identificador público da execução. O worker usa uma credencial de uso único para assumir a reserva. Repetir a chamada do worker preserva o plano, o estado e a reserva da execução ativa.
+
+Se a reserva for removida durante uma consulta de status, o MCP informa `Sem reserva ativa`. Se não conseguir gravar `pid.txt` após iniciar o worker, `submit_plan` confirma o início e retorna um aviso com o PID correto; a execução continua e a reserva permanece sob controle do worker. Nesse caso, `pid.txt` pode estar ausente, incompleto ou conter o PID de uma execução anterior: use o PID da resposta para inspeção.
+
+As atualizações de estado substituem o JSON de forma atômica. Se uma consulta no Windows bloquear a substituição do JSON ou a remoção de `run.lock`, o processo tenta novamente por até um segundo. Antes de cada tentativa de remoção, ele confere a identidade da reserva. Se a primeira gravação de `starting` falhar, o diagnóstico da nova execução usa listas de tarefas e detalhes vazias. Uma recuperação já exigida mantém a reserva mesmo se houver erro ao salvar o estado final ou ao ler o estado da execução em curso.
+
 O estado global final é `completed` quando todas as tarefas são aprovadas, ou `failed`, inclusive em falhas de preparação; erros de preparação ficam em `error`, associados a `run_id`. CLI e MCP iniciam em `starting`, com estado novo antes da preparação, sem reutilizar tarefas ou detalhes da execução anterior; durante o processamento consulte os estados individuais.
 
 Os estados das tarefas são `pending`, `running`, `review`, `approved`, `failed` e `blocked`. Uma falha bloqueia todos os descendentes. `approved` significa revisão aprovada, testes do worktree aprovados, cherry-pick aplicado e testes de integração aprovados.
 
-Worktrees ficam em `.agent-runs/runs/<identificador-da-execução>/wt-<id>`. Cada execução tem seu próprio diretório e branches únicas; IDs de tarefas podem ser reutilizados. Os worktrees são preservados para inspeção. `status.json` e o plano enviado mostram a execução mais recente; o log do MCP é sobrescrito a cada submissão.
+Worktrees ficam em `.agent-runs/runs/<identificador-da-execução>/wt-<id>`. Cada execução tem seu próprio diretório e branches únicas; IDs de tarefas podem ser reutilizados. Os worktrees são preservados para inspeção. CLI e MCP atualizam `submitted-plan.json` de forma atômica, sob a reserva de execução, antes da preparação dos workers. `get_submitted_plan()` retorna esse plano, inclusive se a preparação falhar. Uma execução recusada por reserva ativa não substitui o plano existente. `status.json` e o plano salvo mostram a execução mais recente; o log do MCP é sobrescrito a cada submissão MCP e não é atualizado pela CLI.
 
-Em timeout, o runner encerra e aguarda a árvore de subprocessos antes de retornar. No Windows usa `taskkill /T /F`; em sistemas POSIX usa um grupo de processos dedicado. Se não puder confirmar o encerramento, bloqueia a integração, mantém a reserva e requer inspeção manual dos processos antes de liberar `run.lock`.
+Em timeout, o runner encerra e aguarda a árvore de subprocessos antes de retornar. No Windows, cria cada comando suspenso, associa-o a um Job Object exclusivo e só então libera sua execução. O encerramento usa a API do Windows e verifica que não há processos ativos no Job, mesmo se o pai já terminou; não depende de `taskkill`. Descendentes remanescentes também são encerrados quando um comando termina normalmente. Se a associação falhar, o comando é encerrado sem executar. O módulo `windows_job.py` deve acompanhar `orchestrator.py`; ele usa `pywin32`, já fixado nos arquivos de dependências. Em sistemas POSIX, o runner usa um grupo de processos dedicado. Se não puder confirmar o encerramento, bloqueia a integração, mantém a reserva e requer inspeção manual dos processos antes de liberar `run.lock`.
 
-Se houver timeout, exceção ou `Ctrl+C` nos testes após o cherry-pick, o orquestrador tenta restaurar o código por um **novo commit de revert**. Isso preserva o histórico. Após um revert bem-sucedido, `Ctrl+C` encerra a execução com estado `failed`. Falha ou interrupção durante cherry-pick, revert ou abort que deixe o resultado Git incerto preserva a reserva e exige intervenção manual; consulte o erro e `git status` antes de continuar.
+Durante a implementação paralela, `Ctrl+C` aguarda os workers e verifica seus resultados antes de liberar a reserva. Nenhuma tarefa desse lote integra após a interrupção. Se algum worker exigir recuperação manual, ou se a espera for novamente interrompida sem confirmar o término, a reserva permanece ativa com `recovery_required: true`.
+
+Interrupções durante o encerramento por timeout também preservam a reserva, inclusive se a tentativa adicional de encerrar o processo falhar. No Windows, uma interrupção após criar o subprocesso encerra também a raiz ainda suspensa; se a criação for interrompida antes de retornar seu identificador, a reserva é mantida por precaução. Em falhas de encerramento, o Job Object é fechado antes dos pipes, para que descendentes ativos não bloqueiem a limpeza. Se houver erro ao submeter ou coletar workers, os workers já iniciados são aguardados e inspecionados; recuperação pendente ou submissão incompleta mantém a reserva para inspeção manual.
+
+Se houver timeout, exceção ou `Ctrl+C` nos testes após o cherry-pick, e o comando tiver preservado a branch, o commit e o Git limpo, o orquestrador tenta restaurar o código por um **novo commit de revert**, usando o hash do commit integrado. Isso preserva o histórico. Após um revert bem-sucedido, `Ctrl+C` encerra a execução com estado `failed`. Se os testes alterarem a branch, arquivos ou HEAD, o código é preservado para recuperação manual, sem revert automático. Se a leitura do HEAD integrado ou a verificação de branch/HEAD/arquivos falhar ou for interrompida, a reserva também é mantida, nenhuma outra tarefa integra e nenhum revert automático é tentado. Falha ou interrupção durante cherry-pick, revert ou abort que deixe o resultado Git incerto preserva a reserva e exige intervenção manual; consulte o erro e `git status` antes de continuar.
+
+A branch e o commit de destino são conferidos antes de cada integração e no encerramento, inclusive quando a última tarefa falha antes da revisão. Se houver interrupção logo após aplicar o cherry-pick e antes de confirmar os testes de integração, o commit aplicado fica disponível para inspeção e a reserva permanece ativa. Uma troca de branch durante a implementação ou revisão também exige recuperação. Evite operações Git externas enquanto o orquestrador estiver ativo, pois outro processo pode alterar o repositório entre duas verificações.
 
 Após encerramento abrupto:
 
-1. Leia `.agent-runs/run.log`, `status.json` e `pid.txt` (PID do worker MCP). Confirme no Gerenciador de Tarefas que o worker e seus subprocessos terminaram. A reserva também registra o PID do processo que a criou, que no MCP é o servidor.
+1. Leia `.agent-runs/run.log`, `status.json` e `pid.txt` (PID do worker MCP). Se a submissão avisou que não conseguiu gravar `pid.txt`, use o PID informado na resposta do MCP. Confirme no Gerenciador de Tarefas que o worker e seus subprocessos terminaram. A reserva também registra o PID do processo que a criou, que no MCP é o servidor.
 2. Inspecione `git status`, `git log -5 --oneline` e `git worktree list`. Preserve alterações e resolva operações Git pendentes antes de começar outra execução. Não há retomada automática.
 3. **Somente após confirmar que não há execução ativa**, remova a reserva com `Remove-Item -LiteralPath .agent-runs/run.lock`. Não remova uma reserva ativa.
 4. Corrija a causa, confira a branch e o Git limpo, ajuste o plano se necessário e submeta novamente.
@@ -157,6 +178,6 @@ Diagnóstico rápido: erro `not a git repository` exige executar na raiz Git com
 
 ## Dependências e validação de alterações
 
-`requirements.txt` fixa a dependência direta; `requirements.lock.txt` fixa também as transitivas do ambiente validado, com `pywin32` restrito ao Windows. Use o lock na instalação e na CI. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
+`requirements.txt` fixa as dependências diretas; `requirements.lock.txt` fixa também as transitivas do ambiente validado, com `pywin32` restrito ao Windows. Use o lock na instalação e na CI. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
 
 A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Retomada automática após crash e orçamento de tokens/custo continuam fora do escopo deste protótipo; a reserva e a recuperação manual continuam obrigatórias nesses casos.

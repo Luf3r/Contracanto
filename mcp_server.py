@@ -5,9 +5,9 @@ import os
 import subprocess
 import sys
 from mcp.server.fastmcp import FastMCP
-from orchestrator import ROOT, STORE, validate, reserve_run, release_run, write_json
+from orchestrator import ROOT, STORE, validate, reserve_run, release_run, reservation_id, write_json
 
-mcp = FastMCP('Claude Antigravity Orchestrator')
+mcp = FastMCP('Contracanto')
 
 @mcp.tool()
 def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, test_command_json: str = '[]') -> str:
@@ -29,21 +29,30 @@ def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, test_comman
         return str(error)
     try:
         plan_file = STORE / 'submitted-plan.json'
-        plan_file.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding='utf-8')
+        write_json(plan_file, plan)
         argv = [sys.executable, str(ROOT / 'orchestrator.py'), str(plan_file), '--parallel', str(parallel), '--retries', str(retries), '--reservation', token, '--test', *test]
         kw = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {'start_new_session': True}
         # Estado anterior não deve ser exibido como resultado da nova execução.
-        write_json(STORE / 'status.json', {'state': 'starting', 'run_id': token, 'statuses': {}})
+        write_json(STORE / 'status.json', {'state': 'starting', 'run_id': reservation_id(token), 'statuses': {}})
         with (STORE / 'run.log').open('w', encoding='utf-8') as log:
             proc = subprocess.Popen(argv, cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, **kw)
     except Exception as error:
-        write_json(STORE / 'status.json', {'state': 'failed', 'run_id': token,
-                                         'statuses': {}, 'error': str(error)})
-        release_run(token)
+        try:
+            write_json(STORE / 'status.json', {'state': 'failed', 'run_id': reservation_id(token),
+                                             'statuses': {}, 'error': str(error)})
+        finally:
+            # Falhar ao registrar o erro não deve deixar uma reserva sem worker.
+            release_run(token)
         raise
-    (STORE/'pid.txt').write_text(str(proc.pid), encoding='utf-8')
-    return f'Execução iniciada com PID {proc.pid}. Consulte get_run_status. O início não representa aprovação das tarefas.'
+    message = f'Execução iniciada com PID {proc.pid}. Consulte get_run_status. O início não representa aprovação das tarefas.'
+    try:
+        (STORE/'pid.txt').write_text(str(proc.pid), encoding='utf-8')
+    except OSError as error:
+        # The worker already owns the run; a diagnostic write must not undo it.
+        message += (f'\nAviso: não foi possível salvar pid.txt: {error}. '
+                    f'O arquivo pode estar ausente ou desatualizado; use o PID {proc.pid} desta resposta para inspeção.')
+    return message
 
 @mcp.tool()
 def get_run_status() -> str:
@@ -53,7 +62,20 @@ def get_run_status() -> str:
     logfile = STORE / 'run.log'
     log = logfile.read_text(encoding='utf-8')[-4000:] if logfile.exists() else ''
     reservation = STORE / 'run.lock'
-    lock = reservation.read_text(encoding='utf-8') if reservation.exists() else 'Sem reserva ativa'
+    try:
+        record = json.loads(reservation.read_text(encoding='utf-8'))
+        lock = json.dumps({key: record[key] for key in ('run_id', 'pid') if key in record})
+        # Older workers used their credential as their public run_id too.
+        if legacy_token := record.get('token'):
+            public_id = reservation_id(legacy_token)
+            status = status.replace(legacy_token, public_id)
+            log = log.replace(legacy_token, public_id)
+    except FileNotFoundError:
+        # Normal completion may release the reservation while status is polled.
+        lock = 'Sem reserva ativa'
+    except json.JSONDecodeError:
+        # Polling may observe an exclusive file before its creator finishes writing.
+        lock = 'Reserva presente; registro incompleto'
     return status + '\n--- RESERVA ---\n' + lock + '\n--- LOG ---\n' + log
 
 @mcp.tool()

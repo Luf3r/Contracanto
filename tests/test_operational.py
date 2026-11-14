@@ -1,5 +1,6 @@
 """Regressões operacionais; nenhum teste chama modelos pagos."""
 import json
+import concurrent.futures
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,47 @@ def task(files):
 
 
 class OperationalTests(unittest.TestCase):
+    def test_interrupted_worker_collection_preserves_uncertain_recovery(self):
+        for failure, collected in ((o.RecoveryRequired('process alive'), False),
+                                   (o.RecoveryRequired('process alive'), True),
+                                   (RuntimeError('known failure'), False),
+                                   (None, False)):
+            with self.subTest(failure=failure, collected=collected), tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+                store = Path(directory)
+                current = task(['a'])
+                artifact = dict(task=current, commit='commit', worktree='.', report='done')
+
+                def interrupted(jobs):
+                    concurrent.futures.wait(jobs)
+                    if collected:
+                        yield next(iter(jobs))
+                    raise KeyboardInterrupt
+
+                def git(*args, **kwargs):
+                    return subprocess.CompletedProcess(args, 0, 'base' if args[0] == 'rev-parse' else '', '')
+
+                with patch.object(o, 'STORE', store), patch.object(o, 'git', side_effect=git), \
+                        patch.object(o.shutil, 'which', return_value='tool'), \
+                        patch.object(o, 'run_executor', side_effect=failure, return_value=artifact), \
+                        patch.object(o.concurrent.futures, 'as_completed', side_effect=interrupted), \
+                        patch.object(o, 'review') as review:
+                    uncertain = isinstance(failure, o.RecoveryRequired)
+                    try:
+                        with self.assertRaises(o.RecoveryRequired if uncertain else KeyboardInterrupt):
+                            o.execute(dict(tasks=[current]), 1, 0, ['test'])
+                    except KeyboardInterrupt:
+                        self.fail('Interrupção descartou a recuperação exigida pelo worker')
+                    state = json.loads((store / 'status.json').read_text())
+                    self.assertEqual(state['state'], 'failed')
+                    self.assertEqual(state['recovery_required'], uncertain)
+                    self.assertEqual((store / 'run.lock').exists(), uncertain)
+                    self.assertNotIn('approved', state['statuses'].values())
+                    review.assert_not_called()
+                    if uncertain:
+                        self.assertIn('process alive', state['error'])
+                        with self.assertRaises(RuntimeError):
+                            o.reserve_run()
+
     def test_uncertain_process_cleanup_preserves_reservation(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             store = Path(directory)
@@ -63,7 +105,10 @@ class OperationalTests(unittest.TestCase):
                 self.assertIn(patch_text, json.loads(kw['input_text'].split('\n', 1)[1])['patch'])
                 return subprocess.CompletedProcess(args, 0, json.dumps(dict(result='APPROVED')), '')
             return subprocess.CompletedProcess(args, 0, '', '')
-        with patch.object(o, 'cmd', side_effect=command), patch.object(o, 'git', return_value=subprocess.CompletedProcess([], 0, patch_text, '')):
+        def git(*args, **kwargs):
+            output = patch_text if args[0] == 'show' else ('commit' if args[0] == 'rev-parse' else '')
+            return subprocess.CompletedProcess(args, 0, output, '')
+        with patch.object(o, 'cmd', side_effect=command), patch.object(o, 'git', side_effect=git):
             self.assertTrue(o.review(task(['a']), dict(worktree='.', report='done'), ['test'])[0])
 
     def test_preflight_failure_persists_terminal_state(self):
@@ -139,7 +184,7 @@ class OperationalTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0, json.dumps(dict(event='result', result=result)), '')
                 return original(args, **kw)
             with patch.object(o, 'make_worktree', return_value=root), patch.object(o, 'cmd', side_effect=command):
-                artifact = o.run_executor(task(['old.txt', 'ação com espaço.txt']), 'base', '')
+                artifact = o.run_executor(task(['old.txt', 'ação com espaço.txt']), git('rev-parse', 'HEAD').stdout.strip(), '')
             self.assertEqual(git('status', '--porcelain').stdout, '')
             self.assertEqual(artifact['commit'], git('rev-parse', 'HEAD').stdout.strip())
 

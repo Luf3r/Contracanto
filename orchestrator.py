@@ -4,6 +4,9 @@ Sem deploy/push e sem bypass de permissões. Requer CLI `agy` e `claude` autenti
 from __future__ import annotations
 import argparse
 import concurrent.futures
+import contextlib
+from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,7 +15,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
+
+if os.name == 'nt':
+    from windows_job import WindowsJob
 
 ROOT = Path(__file__).resolve().parent
 STORE = ROOT / '.agent-runs'
@@ -30,42 +37,80 @@ def reserve_run():
     token = uuid.uuid4().hex
     try:
         with (STORE / 'run.lock').open('x', encoding='utf-8') as handle:
-            json.dump({'token': token, 'pid': os.getpid()}, handle)
+            json.dump({'run_id': reservation_id(token), 'pid': os.getpid()}, handle)
     except FileExistsError:
         raise RuntimeError('Já existe execução reservada; consulte get_run_status e o procedimento de recuperação') from None
     return token
 
 
+def reservation_id(token):
+    """Only this public identifier is persisted or returned by status queries."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 def release_run(token):
     path = STORE / 'run.lock'
-    if path.exists() and json.loads(path.read_text(encoding='utf-8'))['token'] == token:
-        path.unlink()
+    run_id = reservation_id(token)
+
+    def remove_owned_lock():
+        try:
+            if json.loads(path.read_text(encoding='utf-8')).get('run_id') == run_id:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+
+    retry_permission_error(remove_owned_lock)
+
+
+def retry_permission_error(operation, *args):
+    # A Windows reader may briefly prevent replacing or removing an open file.
+    for attempt in range(21):
+        try:
+            return operation(*args)
+        except PermissionError:
+            if attempt == 20:
+                raise
+            time.sleep(0.05)
 
 
 def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None):
-    options = ({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+    options = ({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW | WindowsJob.creationflags}
                if os.name == 'nt' else {'start_new_session': True})
     env = dict(os.environ, PYTHONIOENCODING='utf-8')
-    with subprocess.Popen(args, cwd=str(cwd), stdin=subprocess.PIPE,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          encoding='utf-8', errors='replace', env=env, **options) as process:
+    # Close the job before Popen's pipe cleanup: surviving children may still
+    # hold those pipes open if explicit termination failed.
+    with contextlib.ExitStack() as processes, (WindowsJob() if os.name == 'nt' else contextlib.nullcontext()) as job:
+        process = None
         try:
+            process = subprocess.Popen(args, cwd=str(cwd), stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                       encoding='utf-8', errors='replace', env=env, **options)
+            processes.enter_context(process)
+            if job is not None:
+                job.start(process.pid)
             stdout, stderr = process.communicate(input_text, timeout=timeout)
-        except (subprocess.TimeoutExpired, KeyboardInterrupt):
-            # Keep the parent alive until its descendants have been terminated.
+            if job is not None:
+                job.terminate()
+        except (Exception, KeyboardInterrupt) as error:
+            if process is None:
+                if isinstance(error, KeyboardInterrupt):
+                    raise RecoveryRequired('Criação do subprocesso interrompida; resultado desconhecido') from error
+                raise
             try:
-                if os.name == 'nt':
-                    killed = subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
-                                            capture_output=True, timeout=30,
-                                            creationflags=subprocess.CREATE_NO_WINDOW)
-                    if killed.returncode:
-                        raise OSError('taskkill não confirmou o encerramento da árvore: ' + killed.stderr.decode(errors='replace')[-1000:])
+                if job is not None:
+                    job.terminate()
+                    # Assignment may have failed while the root was suspended.
+                    if process.poll() is None:
+                        process.kill()
                 else:
                     os.killpg(process.pid, signal.SIGKILL)
                 process.communicate(timeout=30)
-            except Exception as error:
-                process.kill()
-                raise RecoveryRequired(f'Encerramento dos subprocessos não confirmado: {error}') from error
+            except (Exception, KeyboardInterrupt) as cleanup_error:
+                try:
+                    process.kill()
+                finally:
+                    reason = str(cleanup_error) or type(cleanup_error).__name__
+                    raise RecoveryRequired(f'Encerramento dos subprocessos não confirmado: {reason}') from cleanup_error
             raise
         p = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
     if check and p.returncode:
@@ -90,6 +135,79 @@ def changed_files(wt):
     return list(dict.fromkeys(paths))
 
 
+def check_scope(task, wt, base):
+    # Include committed changes; --no-renames checks both sides of a rename.
+    committed = git('diff', '--name-only', '--no-renames', '-z', base, 'HEAD', cwd=wt).stdout.split('\0')
+    for name in [*changed_files(wt), *filter(None, committed)]:
+        normalized = name.replace('\\', '/')
+        if not any(normalized == item.rstrip('/') or normalized.startswith(item.rstrip('/') + '/')
+                   for item in task['files']):
+            raise RuntimeError(f'Arquivo fora do escopo em {task["id"]}: {name}')
+
+
+def branch_ref(wt):
+    """Return the full branch ref, or HEAD for a detached checkout."""
+    result = git('symbolic-ref', '--quiet', 'HEAD', cwd=wt, check=False)
+    if result.returncode == 1:
+        return 'HEAD'
+    if result.returncode:
+        raise RuntimeError(f'Não foi possível ler a branch: {result.stderr[-2000:]}')
+    return result.stdout.strip()
+
+
+def check_git_operation(wt):
+    git_dir = Path(git('rev-parse', '--absolute-git-dir', cwd=wt).stdout.rstrip('\r\n'))
+    for marker in ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-apply',
+                   'rebase-merge', 'sequencer', 'BISECT_START'):
+        try:
+            (git_dir / marker).stat()
+        except FileNotFoundError:
+            continue
+        raise RuntimeError(f'Operação Git pendente no worktree: {marker}')
+
+
+def check_revision(wt, expected_head, expected_branch=None, recovery=False):
+    """Verify both commit and checkout identity before trusting repository state."""
+    error_type = RecoveryRequired if recovery else RuntimeError
+    try:
+        check_git_operation(wt)
+        branch = branch_ref(wt)
+        changed = ((expected_branch is not None and branch != expected_branch)
+                   or git('rev-parse', 'HEAD', cwd=wt).stdout.strip() != expected_head
+                   or changed_files(wt))
+    except (Exception, KeyboardInterrupt) as error:
+        if recovery:
+            raise RecoveryRequired(f'Não foi possível verificar branch, HEAD e arquivos: {error}') from error
+        raise
+    if changed:
+        raise error_type('Branch, HEAD ou arquivos do repositório alterados; inspecione as alterações preservadas')
+    return branch
+
+
+@dataclass
+class TargetCheckout:
+    branch: str
+    head: str
+
+    def verify(self):
+        check_revision(ROOT, self.head, self.branch, recovery=True)
+
+
+def run_tests(command, wt, expected_head, recovery=False, expected_branch=None):
+    """Tests must preserve the commit, branch (including detached HEAD), and files."""
+    expected_branch = check_revision(wt, expected_head, expected_branch, recovery)
+    try:
+        result = cmd(command, cwd=wt, timeout=600, check=False)
+    except RecoveryRequired:
+        # A dirty worktree must not hide an unconfirmed process termination.
+        raise
+    except (Exception, KeyboardInterrupt):
+        check_revision(wt, expected_head, expected_branch, recovery)
+        raise
+    check_revision(wt, expected_head, expected_branch, recovery)
+    return result
+
+
 def run_agy(prompt, wt):
     # NDJSON stdin avoids Windows command-line limits, including during repairs.
     payload = json.dumps({'event': 'user', 'message': {'content': prompt}}, ensure_ascii=False) + '\n'
@@ -105,8 +223,14 @@ def run_agy(prompt, wt):
 
 def write_json(path, obj):
     tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding='utf-8')
-    tmp.replace(path)
+    try:
+        tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding='utf-8')
+        retry_permission_error(tmp.replace, path)
+    except (Exception, KeyboardInterrupt) as error:
+        # Recovery is required even if its first durable record cannot be saved.
+        if obj.get('recovery_required'):
+            raise RecoveryRequired(f'Falha ao persistir recuperação pendente: {error}') from error
+        raise
 
 
 def validate(plan):
@@ -118,8 +242,8 @@ def validate(plan):
     if any(not isinstance(t, dict) or not isinstance(t.get('id'), str) for t in tasks):
         raise ValueError('Cada tarefa precisa de id textual')
     ids = [t['id'] for t in tasks]
-    if len(set(ids)) != len(ids) or not all(SAFE_ID.fullmatch(v) for v in ids):
-        raise ValueError('IDs duplicados/inválidos')
+    if len({v.casefold() for v in ids}) != len(ids) or not all(SAFE_ID.fullmatch(v) for v in ids):
+        raise ValueError('IDs duplicados (sem distinguir maiúsculas/minúsculas) ou inválidos')
     lookup = set(ids)
     for t in tasks:
         if not isinstance(t.get('description'), str) or not t['description'].strip() or not isinstance(t.get('deps'), list):
@@ -166,37 +290,44 @@ def make_worktree(task, base):
 
 def run_executor(task, base, context):
     wt = make_worktree(task, base)
+    branch = branch_ref(wt)
     prompt = ('Você está implementando UMA tarefa no Git worktree atual. '
-              'Leia GEMINI.md quando presente. Não altere arquitetura, não faça commit/push/deploy. '
+              'Leia GEMINI.md quando presente. Preserve a branch atual. Não altere arquitetura, não faça commit/push/deploy. '
               'Não acesse segredos. NÃO altere arquivos fora da lista files. '
               'Se houver conflito de escopo, reporte sem implementar.\n' +
               json.dumps({'task':task,'context':context}, ensure_ascii=False))
     report = run_agy(prompt, wt)
+    check_executor_checkout(wt, base, branch)
     # Verifica modificações fora do escopo, incluindo arquivos ainda não rastreados.
+    check_scope(task, wt, base)
     changed = changed_files(wt)
-    allowed = task.get('files', [])
-    for f in changed:
-        normalized = f.replace('\\', '/')
-        if not any(normalized == item.rstrip('/') or normalized.startswith(item.rstrip('/') + '/') for item in allowed):
-            raise RuntimeError(f'Arquivo fora do escopo em {task["id"]}: {f}')
     if not changed:
         raise RuntimeError(f'Gemini não alterou arquivos em {task["id"]}')
     git('add', '--all', '--', '.', cwd=wt)
     git('-c', 'user.name=Agent Executor', '-c', 'user.email=agent@localhost', 'commit', '-m', f'agent: {task["id"]}', cwd=wt)
     commit = git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
-    return {'task':task, 'commit':commit, 'worktree':str(wt), 'report':report}
+    return {'task':task, 'commit':commit, 'branch':branch, 'worktree':str(wt), 'report':report, 'context':context}
+
+
+def check_executor_checkout(wt, head, branch):
+    check_git_operation(wt)
+    if branch_ref(wt) != branch or git('rev-parse', 'HEAD', cwd=wt).stdout.strip() != head:
+        raise RuntimeError('Executor alterou a branch ou HEAD do worktree')
 
 
 def review(task, artifact, test_command):
     wt = Path(artifact['worktree'])
-    test = cmd(test_command, cwd=wt, timeout=600, check=False) if test_command else None
+    head = git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
+    if artifact.get('commit', head) != head:
+        raise RuntimeError('HEAD do worktree difere do commit candidato')
+    test = run_tests(test_command, wt, head, expected_branch=artifact.get('branch')) if test_command else None
     test_output = (test.stdout + '\n' + test.stderr)[-10000:] if test else 'Nenhum comando de teste configurado'
     diff = git('show', '--format=medium', '--stat', 'HEAD', cwd=wt).stdout
-    patch = git('show', '--format=', 'HEAD', cwd=wt).stdout
+    patch = git('show', '--format=', '--binary', '--no-textconv', '--no-ext-diff', 'HEAD', cwd=wt).stdout
     prompt = ('Você é revisor de código. Verifique a task e o diff contra critérios de aceitação. '
               'Responda EXATAMENTE com uma palavra na primeira linha: APPROVED ou REJECTED. '
               'Nas linhas seguintes explique problemas encontrados. Testes não executados NÃO equivalem a testes aprovados. '
-              'Não modifique arquivos.\n' + json.dumps({'task': task, 'diff_summary':diff,
+              'Não modifique arquivos.\n' + json.dumps({'task': task, 'context': artifact.get('context', ''), 'diff_summary':diff,
                      'patch':patch, 'executor_report':artifact['report'],
                      'test_exit_code':test.returncode if test else None,
                      'test_output':test_output}, ensure_ascii=False))
@@ -205,40 +336,58 @@ def review(task, artifact, test_command):
                    cwd=wt, timeout=900, input_text=prompt)
     verdict = parse_json_output(response.stdout, 'claude').strip()
     approved = verdict.splitlines()[0:1] == ['APPROVED'] and test is not None and test.returncode == 0
+    if test is not None and test.returncode:
+        verdict += f'\nTestes do worktree falharam (código {test.returncode}):\n{test_output}'
     return approved, verdict, test_output
 
 
 def execute(plan, max_workers, retries, tests, reservation=None):
     global RUN_DIR
     token = reservation or reserve_run()
-    owned = False
-    keep_lock = False
+    run_id = reservation_id(token)
+    if json.loads((STORE / 'run.lock').read_text(encoding='utf-8')).get('run_id') != run_id:
+        raise RuntimeError('Reserva de execução inválida')
+    # mkdir is the single-use handoff. A losing worker must never enter cleanup.
+    run_dir = STORE / 'runs' / run_id
     try:
-        if json.loads((STORE / 'run.lock').read_text(encoding='utf-8'))['token'] != token:
-            raise RuntimeError('Reserva de execução inválida')
-        owned = True
+        run_dir.mkdir(parents=True)
+    except FileExistsError:
+        raise RuntimeError('Reserva já assumida por outro worker') from None
+    except (OSError, KeyboardInterrupt) as error:
+        raise RecoveryRequired('Não foi possível assumir a reserva; inspecione run.lock e o diretório da execução') from error
+    RUN_DIR = run_dir
+    keep_lock = False
+    state_initialized = False
+    try:
         # CLI e MCP começam com estado próprio antes de qualquer preparação.
-        write_json(STORE / 'status.json', {'state': 'starting', 'run_id': token,
+        write_json(STORE / 'status.json', {'state': 'starting', 'run_id': run_id,
                                          'statuses': {}, 'details': {}})
-        RUN_DIR = STORE / 'runs' / token
-        RUN_DIR.mkdir(parents=True)
+        state_initialized = True
+        if isinstance(plan, Path):
+            plan = json.loads(plan.read_text(encoding='utf-8'))
+        # Publish the current CLI or MCP plan only after proving lock ownership.
+        write_json(STORE / 'submitted-plan.json', plan)
         result = _execute(plan, max_workers, retries, tests)
+        # Until the final state is read, recovery may already be pending.
+        keep_lock = True
         state = json.loads((STORE / 'status.json').read_text(encoding='utf-8'))
         keep_lock = state.get('recovery_required', False)
         state['state'] = 'completed' if all(s == 'approved' for s in result.values()) else 'failed'
-        state['run_id'] = token
+        state['run_id'] = run_id
         write_json(STORE / 'status.json', state)
         return result
     except (Exception, KeyboardInterrupt) as error:
-        if not owned:
-            raise
-        keep_lock = isinstance(error, RecoveryRequired)
+        keep_lock = keep_lock or isinstance(error, RecoveryRequired)
         path = STORE / 'status.json'
+        state = {'statuses': {}, 'details': {}}
         try:
-            state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'statuses': {}}
+            if state_initialized:
+                state = json.loads(path.read_text(encoding='utf-8'))
         except (ValueError, OSError):
-            state = {'statuses': {}}
-        state.update(state='failed', run_id=token, error=str(error) or type(error).__name__,
+            keep_lock = True
+        # A later persistence error must never clear an earlier recovery flag.
+        keep_lock = keep_lock or state.get('recovery_required', False)
+        state.update(state='failed', run_id=run_id, error=str(error) or type(error).__name__,
                      recovery_required=keep_lock)
         for tid, value in state.get('statuses', {}).items():
             if value in ('pending', 'running', 'review'):
@@ -260,6 +409,19 @@ def _execute(plan, max_workers, retries, tests):
         raise RuntimeError('Instale/autentique agy e claude; ambos devem estar no PATH')
     if git('status', '--porcelain').stdout.strip():
         raise RuntimeError('Repositório precisa estar limpo antes de executar')
+    target = TargetCheckout(branch_ref(ROOT), git('rev-parse', 'HEAD').stdout.strip())
+    try:
+        return _run_tasks(plan, max_workers, retries, tests, target)
+    except RecoveryRequired:
+        raise
+    except (Exception, KeyboardInterrupt):
+        # An interruption may arrive between two Git calls. Only release the
+        # reservation if the target still matches the last verified revision.
+        target.verify()
+        raise
+
+
+def _run_tasks(plan, max_workers, retries, tests, target):
     statuses = {t['id']: 'pending' for t in plan['tasks']}
     details = {}
     write_json(STORE / 'status.json', {'statuses':statuses, 'details':details})
@@ -278,26 +440,51 @@ def _execute(plan, max_workers, retries, tests):
             owned |= files
             if len(batch) >= max_workers:
                 break
-        base = git('rev-parse', 'HEAD').stdout.strip()
+        target.verify()
+        base = target.head
         context = 'Base do código: ' + base
+        if plan.get('goal'):
+            context += '\nObjetivo geral: ' + str(plan['goal'])
         for t in batch:
             statuses[t['id']] = 'running'
         write_json(STORE/'status.json', {'statuses':statuses,'details':details})
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            jobs = {pool.submit(run_executor, t, base, context):t for t in batch}
-            artifacts=[]
-            recovery_error = None
-            for future in concurrent.futures.as_completed(jobs):
-                t=jobs[future]
-                try:
-                    artifact = future.result()
-                    statuses[t['id']]='review'
-                    artifacts.append(artifact)
-                except Exception as e:
-                    statuses[t['id']]='failed'
-                    details[t['id']]={'error':str(e)}
-                    if isinstance(e, RecoveryRequired):
-                        recovery_error = e
+        jobs = {}
+        artifacts = []
+        recovery_error = None
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        try:
+            with pool:
+                for t in batch:
+                    jobs[pool.submit(run_executor, t, base, context)] = t
+                for future in concurrent.futures.as_completed(jobs):
+                    t=jobs[future]
+                    try:
+                        artifact = future.result()
+                        statuses[t['id']]='review'
+                        artifacts.append(artifact)
+                    except Exception as e:
+                        statuses[t['id']]='failed'
+                        details[t['id']]={'error':str(e)}
+                        if isinstance(e, RecoveryRequired):
+                            recovery_error = e
+        except (Exception, KeyboardInterrupt) as interruption:
+            # Submission/collection failures must also inspect existing workers.
+            try:
+                pool.shutdown(wait=True)
+            except (Exception, KeyboardInterrupt) as error:
+                raise RecoveryRequired('Espera dos workers interrompida; encerramento não confirmado') from error
+            for future, t in jobs.items():
+                error = future.exception()
+                if error is not None:
+                    statuses[t['id']] = 'failed'
+                    details[t['id']] = {'error': str(error)}
+                    if isinstance(error, RecoveryRequired):
+                        recovery_error = error
+            if recovery_error is not None:
+                raise RecoveryRequired(f'Execução interrompida com recuperação pendente: {recovery_error}') from interruption
+            if len(jobs) != len(batch):
+                raise RecoveryRequired('Submissão dos workers interrompida; resultados incompletos') from interruption
+            raise
         if recovery_error is not None:
             for tid, state in statuses.items():
                 if state in ('pending', 'review', 'running'):
@@ -311,8 +498,10 @@ def _execute(plan, max_workers, retries, tests):
             feedback=''
             for attempt in range(retries+1):
                 try:
-                    ok, feedback, output = review(t, artifact, tests)
+                    check_scope(t, Path(artifact['worktree']), base)
+                    ok, feedback, _ = review(t, artifact, tests)
                     if ok:
+                        target.verify()
                         try:
                             applied=git('cherry-pick', artifact['commit'], check=False)
                         except (Exception, KeyboardInterrupt) as error:
@@ -321,42 +510,58 @@ def _execute(plan, max_workers, retries, tests):
                             raise RecoveryRequired(f'Resultado do cherry-pick desconhecido: {error}') from error
                         if applied.returncode:
                             try:
+                                # Conflicts may dirty the tree, but abort must stay on the original branch.
+                                if branch_ref(ROOT) != target.branch:
+                                    raise RecoveryRequired('Branch de destino alterada antes do abort')
                                 aborted = git('cherry-pick','--abort', check=False)
                             except (Exception, KeyboardInterrupt) as error:
                                 raise RecoveryRequired(f'Falha ao executar abort de cherry-pick: {error}') from error
                             if aborted.returncode:
                                 raise RecoveryRequired('Falha ao abortar cherry-pick; revisão manual necessária')
+                            target.verify()
                             raise RuntimeError('Conflito ao integrar commit; requer intervenção ou replanejamento')
                         # Testes de integração na branch principal após cherry-pick.
                         try:
-                            integrated=cmd(tests, timeout=600, check=False)
+                            integrated_head = git('rev-parse', 'HEAD').stdout.strip()
+                        except (Exception, KeyboardInterrupt) as error:
+                            raise RecoveryRequired(f'Não foi possível identificar o HEAD integrado: {error}') from error
+                        try:
+                            integrated=run_tests(tests, ROOT, integrated_head, recovery=True,
+                                                 expected_branch=target.branch)
                             if integrated.returncode:
                                 raise RuntimeError('Testes de integração falharam: ' + (integrated.stdout + integrated.stderr)[-2000:])
                         except RecoveryRequired:
                             raise
                         except (Exception, KeyboardInterrupt) as integration_error:
+                            check_revision(ROOT, integrated_head, target.branch, recovery=True)
                             try:
-                                revert = git('revert','--no-edit','HEAD',check=False)
+                                revert = git('revert','--no-edit',integrated_head,check=False)
                             except (Exception, KeyboardInterrupt) as error:
                                 raise RecoveryRequired(f'Falha ao executar revert: {error}') from error
                             if revert.returncode:
                                 raise RecoveryRequired('Testes falharam e o revert automático também; revisão manual necessária')
+                            try:
+                                reverted_head = git('rev-parse', 'HEAD').stdout.strip()
+                            except (Exception, KeyboardInterrupt) as error:
+                                raise RecoveryRequired(f'Não foi possível identificar o HEAD após revert: {error}') from error
+                            check_revision(ROOT, reverted_head, target.branch, recovery=True)
+                            target.head = reverted_head
                             if isinstance(integration_error, KeyboardInterrupt):
                                 raise
                             raise RuntimeError(f'Integração revertida: {integration_error}') from integration_error
+                        target.head = integrated_head
                         statuses[t['id']]='approved'
                         details[t['id']].update(commit=artifact['commit'], review=feedback)
                         break
                     if attempt == retries:
                         raise RuntimeError('Rejeitado após tentativas: '+feedback[-2000:])
                     wt=Path(artifact['worktree'])
-                    correction = run_agy('Corrija a tarefa abaixo considerando a revisão. Não faça commit/push/deploy. Não modifique arquivos fora de files.\n' + json.dumps({'task': t, 'review': feedback}, ensure_ascii=False), wt)
+                    correction = run_agy('Corrija a tarefa abaixo considerando a revisão. Preserve a branch atual. Não faça commit/push/deploy. Não modifique arquivos fora de files.\n' + json.dumps({'task': t, 'context': context, 'review': feedback}, ensure_ascii=False), wt)
                     artifact['report'] += '\nCorreção: ' + correction
+                    check_executor_checkout(wt, artifact['commit'], artifact['branch'])
+                    check_scope(t, wt, base)
                     modified = changed_files(wt)
                     if modified:
-                        for f in modified:
-                            if not any(f == x.rstrip('/') or f.startswith(x.rstrip('/') + '/') for x in t.get('files', [])):
-                                raise RuntimeError('Correção fora de escopo: '+f)
                         git('add','--all','--','.',cwd=wt)
                         git('-c','user.name=Agent Executor','-c','user.email=agent@localhost','commit','-m',f'agent: repair {t["id"]}',cwd=wt)
                         # Tem que integrar a sequência inteira, não apenas o último commit.
@@ -384,6 +589,7 @@ def _execute(plan, max_workers, retries, tests):
         for tid in blocked:
             statuses[tid] = 'blocked'
     write_json(STORE/'status.json', {'statuses':statuses,'details':details})
+    target.verify()
     return statuses
 
 
@@ -398,12 +604,7 @@ def main():
     if args.parallel < 1 or args.parallel > 8 or args.retries not in range(4):
         p.error('parallel deve ser 1..8, retries 0..3')
     if args.reservation:
-        try:
-            plan=json.loads(args.plan.read_text(encoding='utf-8'))
-        except Exception:
-            release_run(args.reservation)
-            raise
-        result=execute(plan,args.parallel,args.retries,args.test,reservation=args.reservation)
+        result=execute(args.plan,args.parallel,args.retries,args.test,reservation=args.reservation)
     else:
         plan=json.loads(args.plan.read_text(encoding='utf-8'))
         result=execute(plan,args.parallel,args.retries,args.test)
