@@ -225,9 +225,21 @@ def resume_plan(ws: Workspace, run_id: str | None = None) -> plan.Plan:
     details = current.get('details') or {}
     for task in previous['tasks']:
         task_id = task['id']
+        detail = details.get(task_id) or {}
+        commit = detail.get('integrated_commit')
         if statuses.get(task_id) != 'approved':
+            # Um worker encerrado entre o cherry-pick e a aprovação deixa o commit na branch.
+            if (
+                commit
+                and not detail.get('revert_commit')
+                and gitops.contains_commit(ws.root, commit)
+                and not gitops.reverted(ws.root, commit)
+            ):
+                raise RuntimeError(
+                    f'A tarefa {task_id} não foi aprovada na execução {run_id[:12]}, mas o commit {commit[:12]} '
+                    'dela está no HEAD atual. Desfaça-o com git revert, ou submeta um plano novo sem a tarefa'
+                )
             continue
-        commit = (details.get(task_id) or {}).get('integrated_commit')
         if not commit or not gitops.contains_commit(ws.root, commit):
             raise RuntimeError(
                 f'A tarefa {task_id} foi aprovada na execução {run_id[:12]}, mas o commit dela não está no '

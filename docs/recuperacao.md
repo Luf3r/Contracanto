@@ -37,7 +37,7 @@ Além de `state`, `run_id`, `statuses`, `details`, `recovery_required` e `error`
 
 - `started_at`, `updated_at` e `finished_at`: horários em ISO 8601, UTC; `finished_at` é `null` até o estado final.
 - `duration_seconds`: duração da execução até a última gravação ou até o estado final.
-- `target`: a `branch` de destino (ref completa) e o commit `base` sobre o qual a execução começou; ausente quando a preparação falha antes disso.
+- `target`: a `branch` de destino (ref completa) e o commit `base` sobre o qual a execução começou; ausente quando a preparação falha antes disso. `branch_removed: true` indica que a branch de integração terminou vazia e foi apagada.
 - `timings.<id>`: `started_at` e `finished_at` da tarefa e, em `phases`, os segundos acumulados e o número de vezes de cada fase (`implementation`, `review`, `repair`, `integration`). Uma tarefa bloqueada antes de começar não tem `started_at`.
 
 ### Detalhes de cada tarefa
@@ -142,7 +142,7 @@ Nesses casos nenhuma outra tarefa integra. Consulte o erro e `git status` antes 
 4. **Libere a reserva** com `contracanto --unlock`.
 5. **Corrija a causa**, confira a branch e o Git limpo e então submeta um plano novo ou refaça só o que faltou com `contracanto --resume --test ...` (ou `resume_run` pelo MCP).
 
-A retomada cria uma execução nova com as tarefas que não estavam `approved`. Ela confia no estado gravado: se o worker morreu entre o cherry-pick e a aprovação de uma tarefa, o commit dela pode estar na branch com a tarefa marcada como `blocked`. Confira `details.<id>.integrated_commit` e `git log` no passo 3 e desfaça esse commit, ou retire a tarefa submetendo um plano novo, antes de retomar.
+A retomada cria uma execução nova com as tarefas que não estavam `approved`. Se o worker morreu entre o cherry-pick e a aprovação de uma tarefa, o commit dela está na branch com a tarefa marcada como `blocked`. A retomada detecta isso por `details.<id>.integrated_commit` e recusa, com o commit no erro: desfaça-o com `git revert`, que ela reconhece pela mensagem padrão do revert, ou submeta um plano novo sem a tarefa.
 
 O `--unlock` recusa, com código de saída 1, em qualquer destes casos:
 

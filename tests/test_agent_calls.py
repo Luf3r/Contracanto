@@ -177,3 +177,23 @@ class CommitMessageTests(unittest.TestCase):
             self.assertEqual(len(subject), agents.COMMIT_SUBJECT_LENGTH)
             self.assertTrue(subject.endswith('…'))
             self.assertIn('aaaaaaaaaaaa', body)
+
+
+class PinnedSetupTests(support.RepositoryTestCase):
+    def test_worker_runs_the_pinned_setup_when_none_is_supplied(self):
+        with self.repository() as (root, store, base, task, git):
+            code = "import os; os.makedirs('.agent-runs'); open('.agent-runs/dependency', 'w').write('installed')"
+            seen = []
+            original = agents.run_agy
+
+            def agent(prompt, wt, stop=None):
+                seen.append((wt / '.agent-runs' / 'dependency').exists())
+                return original(prompt, wt, stop)
+
+            with (
+                patch.object(config, 'SETUP_COMMAND', [sys.executable, '-c', code]),
+                patch.object(agents, 'run_agy', side_effect=agent),
+            ):
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, PASS)
+            self.assertEqual(states, {'A': 'approved'})
+            self.assertEqual(seen, [True])

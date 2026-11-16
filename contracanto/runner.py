@@ -127,6 +127,7 @@ def _execute(
     if not tests:
         raise RuntimeError('Configure um comando de testes via --test (obrigatório)')
     config.check_pinned(tests, ctx.setup)
+    ctx.setup = config.pinned_setup(ctx.setup)
     if not shutil.which('agy') or not shutil.which('claude'):
         raise RuntimeError('Instale/autentique agy e claude; ambos devem estar no PATH')
     tests = resolve_command(tests, ctx.root, 'Comando de testes')
@@ -136,6 +137,7 @@ def _execute(
         raise RuntimeError(f'{ctx.root} é um subdiretório do repositório Git; informe a raiz dele')
     if gitops.changed_files(ctx.root):
         raise RuntimeError('Repositório precisa estar limpo antes de executar')
+    origin = gitops.checkout_state(ctx.root)
     if ctx.branch:
         gitops.create_branch(ctx.root, ctx.branch)
         log.info('Branch de integração criada: %s', ctx.branch)
@@ -147,14 +149,35 @@ def _execute(
         )
     ctx.state.target = {'branch': target.branch, 'base': target.head}
     try:
-        return _run_tasks(ctx, plan, max_workers, retries, tests, target)
+        result = _run_tasks(ctx, plan, max_workers, retries, tests, target)
     except RecoveryRequired:
         raise
     except (Exception, KeyboardInterrupt):
         # Uma interrupção pode chegar entre duas chamadas ao Git. A reserva só é
         # liberada se o destino ainda corresponder à última revisão verificada.
         target.verify()
+        _drop_empty_branch(ctx, target, origin)
         raise
+    _drop_empty_branch(ctx, target, origin)
+    return result
+
+
+def _drop_empty_branch(ctx: RunContext, target: TargetCheckout, origin: gitops.CheckoutState) -> None:
+    """Desfaz a branch de integração que terminou sem nenhum commit.
+
+    É apenas limpeza, feita com o destino já verificado: uma falha fica no log
+    e a branch permanece.
+    """
+    run = ctx.state
+    if not ctx.branch or run.recovery_required or target.head != origin.head or run.target is None:
+        return
+    try:
+        gitops.drop_branch(ctx.root, ctx.branch, origin)
+    except Exception as error:
+        log.info('Branch de integração vazia não removida: %s', _summary(error))
+        return
+    run.target['branch_removed'] = True
+    log.info('Branch de integração %s removida: nenhuma tarefa foi integrada', ctx.branch)
 
 
 def schedule_batch(tasks: Sequence[Task], statuses: Mapping[str, TaskStatus], max_workers: int) -> list[Task]:

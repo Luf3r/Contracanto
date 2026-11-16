@@ -100,6 +100,14 @@ class PinnedCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'não permite'):
                 config.check_pinned(['t'], ['npm', 'ci'])
 
+    def test_pinned_setup_is_used_when_none_is_supplied(self):
+        self.assertIsNone(config.pinned_setup(None))
+        with patch.object(config, 'SETUP_COMMAND', ['npm', 'ci']):
+            self.assertEqual(config.pinned_setup(None), ['npm', 'ci'])
+            self.assertEqual(config.pinned_setup(['npm', 'ci']), ['npm', 'ci'])
+        with patch.object(config, 'SETUP_COMMAND', []):
+            self.assertIsNone(config.pinned_setup(None))
+
     def test_mcp_submission_is_refused_without_reserving(self):
         with (
             support.temp_workspace(server) as ws,

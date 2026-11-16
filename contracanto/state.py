@@ -121,16 +121,9 @@ class Workspace:
 REPO_ENV = 'CONTRACANTO_REPO'
 
 
-def _installation_root() -> Path | None:
-    """Diretório do projeto quando o pacote foi copiado para dentro dele (não instalado)."""
-    parent = Path(__file__).resolve().parent.parent
-    return parent if (parent / 'orchestrator.py').is_file() else None
-
-
 def default_workspace(repo: str | Path | None = None) -> Workspace:
-    """Repositório orquestrado: `repo`, a variável CONTRACANTO_REPO, o projeto que
-    contém esta cópia do pacote ou, com o pacote instalado, o diretório atual."""
-    root = Path(repo or os.environ.get(REPO_ENV) or _installation_root() or Path.cwd())
+    """Repositório orquestrado: `repo`, a variável CONTRACANTO_REPO ou o diretório atual."""
+    root = Path(repo or os.environ.get(REPO_ENV) or Path.cwd())
 
     if not root.is_dir():
         raise ValueError(f'Repositório não encontrado: {root}')
@@ -194,7 +187,7 @@ class RunState:
         self.recovery_required = False
         self.error: str | None = None
         # Branch de destino e commit sobre o qual a execução começou.
-        self.target: dict[str, str] | None = None
+        self.target: dict[str, Any] | None = None
         self.started_at = now()
         self.finished_at: str | None = None
         self._started = time.monotonic()

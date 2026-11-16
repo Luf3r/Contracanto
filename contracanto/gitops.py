@@ -296,6 +296,24 @@ def create_branch(root: Path, name: str) -> None:
         raise RuntimeError(f'Não foi possível criar a branch {name}: {created.stderr.strip()[-config.ERROR_TAIL :]}')
 
 
+def drop_branch(root: Path, name: str, origin: CheckoutState) -> None:
+    """Volta o checkout para onde estava e apaga `name`, que não recebeu commits."""
+    if origin.branch == 'HEAD':
+        git('switch', '--detach', origin.head, cwd=root)
+    else:
+        git('switch', origin.branch.removeprefix('refs/heads/'), cwd=root)
+    # -d recusa apagar uma branch com commits que o checkout atual não tem.
+    git('branch', '-d', name, cwd=root)
+
+
+def reverted(root: Path, commit: str) -> bool:
+    """Se algum commit posterior, no histórico do HEAD, é o `git revert` de `commit`."""
+    found = git(
+        'log', '--format=%H', '--fixed-strings', f'--grep=This reverts commit {commit}', f'{commit}..HEAD', cwd=root
+    )
+    return bool(found.stdout.strip())
+
+
 def contains_commit(root: Path, commit: str) -> bool:
     """Se `commit` faz parte do histórico do HEAD atual."""
     return git('merge-base', '--is-ancestor', commit, 'HEAD', cwd=root, check=False).returncode == 0

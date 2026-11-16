@@ -94,8 +94,8 @@ AGENT_RETRIES = _count('AGENT_RETRIES', 1, range(4))
 REVIEW_PATCH_LIMIT = _count('REVIEW_PATCH_LIMIT', 400_000, range(1, 10_000_001))
 
 # Comandos fixados pelo operador. Com TEST_COMMAND definido, só esse comando de testes é
-# aceito. Com SETUP_COMMAND definido, a preparação informada precisa ser igual a ele; a
-# lista vazia proíbe qualquer preparação. Sem as variáveis, vale o que quem submete escolher.
+# aceito. Com SETUP_COMMAND definido, a preparação informada precisa ser igual a ele e,
+# sem nenhuma informada, ele é usado; a lista vazia proíbe qualquer preparação. Sem as variáveis, vale o que quem submete escolher.
 TEST_COMMAND = _command('TEST_COMMAND')
 SETUP_COMMAND = _command('SETUP_COMMAND', allow_empty=True)
 
@@ -136,3 +136,8 @@ def check_pinned(test: Sequence[str] | None, setup: Sequence[str] | None) -> Non
             f'O operador fixou o comando de preparação em {ENV_PREFIX}SETUP_COMMAND; '
             f'omita-o ou use exatamente {json.dumps(SETUP_COMMAND, ensure_ascii=False)}'
         )
+
+
+def pinned_setup(setup: Sequence[str] | None) -> Sequence[str] | None:
+    """A preparação fixada pelo operador vale também quando quem submete não informa nenhuma."""
+    return SETUP_COMMAND if setup is None and SETUP_COMMAND else setup

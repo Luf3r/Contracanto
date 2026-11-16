@@ -39,7 +39,7 @@ A instalação cria os comandos `contracanto` (CLI) e `contracanto-mcp` (servido
 3. O estado das execuções fica em `.agent-runs/` dentro desse repositório, que precisa ignorar o diretório para continuar limpo: acrescente `.agent-runs/` ao `.gitignore` ou a `.git/info/exclude`.
 4. O executor e todas as correções passam explicitamente `--mode auto --sandbox` ao Antigravity, sem `--dangerously-skip-permissions`. Configure uma allowlist limitada no CLI antes de operar. Comandos negados devem ser autorizados de forma granular; não desative o sandbox para contornar a falha. O modo headless pode negar comandos não autorizados. Configure permissões granulares conforme docs: https://antigravity.google/docs/cli/headless/
 
-Também é possível copiar `contracanto/`, `orchestrator.py` e `mcp_server.py` para a raiz do projeto e instalar ali só o `requirements.lock.txt`. Nesse modo, `py orchestrator.py` equivale a `contracanto`, `mcp_server.py` é o servidor MCP e o projeto orquestrado é o que contém os arquivos. Os arquivos copiados passam a fazer parte do repositório e precisam de um commit antes da primeira execução.
+Sem instalar, `python -m contracanto` e `python -m contracanto.server` equivalem a `contracanto` e `contracanto-mcp`, desde que o diretório desta cópia esteja no `PYTHONPATH`. Para desenvolver o próprio Contracanto, instale-o no venv dele com `python -m pip install -e ".[dev]"`.
 
 ## Teste sem MCP
 Copie `examples/plan.example.json`, edite com tasks reais e arquivos autorizados e use um repositório descartável. Exemplo, a partir da raiz do repositório:
@@ -52,7 +52,7 @@ O plano de exemplo é ilustrativo; adaptações são necessárias conforme o sta
 
 `--test` deve ser a **última opção**: todos os argumentos seguintes pertencem ao comando de testes, inclusive `-m`, `-v` e outras flags. `contracanto --help` lista todas as opções e `--version` mostra a versão. `--repo CAMINHO` escolhe o repositório a orquestrar e `--keep-worktrees` preserva worktree e branch das tarefas aprovadas.
 
-Por padrão, cada tarefa aprovada vira um commit na branch em uso, inclusive a `main`. Com `--branch NOME`, o worker cria essa branch no commit atual, passa o checkout para ela e integra ali; a branch de origem não recebe nada e você decide depois se e como juntar. O nome precisa ser novo. O checkout fica na branch nova ao final, mesmo que nenhuma tarefa seja aprovada. `status.target` registra a branch de destino e o commit de partida.
+Por padrão, cada tarefa aprovada vira um commit na branch em uso, inclusive a `main`. Com `--branch NOME`, o worker cria essa branch no commit atual, passa o checkout para ela e integra ali; a branch de origem não recebe nada e você decide depois se e como juntar. O nome precisa ser novo. O checkout fica na branch nova ao final. Se nenhuma tarefa for integrada, o worker volta o checkout para onde estava e apaga a branch vazia (`status.target.branch_removed`), salvo quando a execução exige recuperação manual. `status.target` registra a branch de destino e o commit de partida.
 
 Cada tarefa roda em um worktree novo, que só contém os arquivos rastreados pelo Git: `.venv`, `node_modules` e outros diretórios ignorados não existem ali. Se os testes dependem deles, informe um comando de preparação com `--setup-json`, uma lista JSON de argumentos, antes de `--test`:
 
@@ -77,7 +77,7 @@ Erros de uso e de preparação, como plano inexistente ou repositório com alter
 
 Todos aceitam `--repo CAMINHO`. `--unlock` recusa, com código de saída 1, enquanto o worker da execução ou um comando iniciado por ele estiver vivo, houver operação Git pendente ou o repositório tiver alterações. `--prune-runs` nunca remove a execução reservada, uma sem estado final ou uma com recuperação pendente. Sem `--force`, também mantém a execução inteira quando algum worktree dela tem alterações, o que é comum em tarefas que falharam; com `--force`, essas alterações e as branches `agent/*` são descartadas.
 
-`--resume` (ou a ferramenta MCP `resume_run`) cria uma execução nova com o plano da anterior, sem as tarefas aprovadas e sem as dependências que apontavam para elas. Aceita as mesmas opções de uma execução comum. É recusada se o commit integrado de alguma tarefa aprovada não estiver mais no histórico do HEAD atual, por exemplo depois de trocar de branch ou desfazer commits. Uma tarefa que estava sendo integrada quando o worker foi encerrado à força não conta como aprovada: confira o repositório pelo procedimento de recuperação antes de retomar.
+`--resume` (ou a ferramenta MCP `resume_run`) cria uma execução nova com o plano da anterior, sem as tarefas aprovadas e sem as dependências que apontavam para elas. Aceita as mesmas opções de uma execução comum. É recusada se o commit integrado de alguma tarefa aprovada não estiver mais no histórico do HEAD atual, por exemplo depois de trocar de branch ou desfazer commits. Também é recusada quando o commit de uma tarefa não aprovada continua no HEAD sem ter sido revertido, o que acontece se o worker for encerrado à força durante a integração: desfaça o commit com `git revert` ou submeta um plano novo sem a tarefa.
 
 Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `"env"` na configuração do servidor; o worker herda o ambiente. Um valor inválido interrompe a inicialização com o nome da variável.
 
@@ -92,7 +92,7 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_AGENT_RETRIES` | 1 | Novas chamadas ao `agy` quando uma implementação ou correção falha (0 a 3) |
 | `CONTRACANTO_REVIEW_PATCH_LIMIT` | 400000 | Tamanho máximo do patch enviado ao revisor, em caracteres |
 | `CONTRACANTO_TEST_COMMAND` | sem valor | Lista JSON de argumentos. Fixa o comando de testes: um comando diferente é recusado |
-| `CONTRACANTO_SETUP_COMMAND` | sem valor | Lista JSON de argumentos. Fixa o comando de preparação: só ele, ou nenhum, é aceito; `[]` proíbe qualquer preparação |
+| `CONTRACANTO_SETUP_COMMAND` | sem valor | Lista JSON de argumentos. Fixa o comando de preparação: um diferente é recusado e, sem nenhum informado, ele é usado; `[]` proíbe qualquer preparação |
 
 Sem as duas últimas variáveis, quem chama `submit_plan` escolhe os comandos, e no uso pelo MCP quem chama é o modelo. Para que só o operador decida o que roda com as permissões dele, defina as duas em `"env"` do servidor, por exemplo `"CONTRACANTO_TEST_COMMAND": "[\"py\",\"-m\",\"pytest\"]"` e `"CONTRACANTO_SETUP_COMMAND": "[]"`. A comparação é exata, argumento por argumento, e a recusa informa o comando esperado. A conferência vale também para a CLI executada com essas variáveis no ambiente.
 
@@ -171,7 +171,7 @@ Crie o `.mcp.json` **na raiz do repositório a orquestrar**, com o caminho absol
 }
 ```
 
-No modo de cópia, use `"command"` com o Python do venv do projeto e `"args": ["C:\\CAMINHO\\DO\\PROJETO\\mcp_server.py"]`, sem `env`. O nome do servidor (`contracanto` no exemplo) é o prefixo das ferramentas nas permissões do Claude Code; ao renomear um servidor já configurado, as permissões concedidas ao nome antigo não valem para o novo.
+O nome do servidor (`contracanto` no exemplo) é o prefixo das ferramentas nas permissões do Claude Code; ao renomear um servidor já configurado, as permissões concedidas ao nome antigo não valem para o novo.
 
 Alternativamente, configure o MCP no ambiente local do Claude Code. O MCP de Chat e o da aba Code não são os mesmos. Reinicie a sessão local do Claude e verifique se aparecem as ferramentas `submit_plan`, `resume_run`, `wait_for_run`, `get_run_status`, `stop_run` e `get_submitted_plan`.
 
@@ -204,7 +204,7 @@ O formato do estado, as garantias de cada etapa e o procedimento após encerrame
 
 ## Estrutura do código
 
-Instalado, o pacote oferece os comandos `contracanto` e `contracanto-mcp`; `orchestrator.py` e `mcp_server.py` são atalhos para o modo de cópia. `examples/` traz um plano ilustrativo e o plano e a verificação do smoke. Toda a lógica fica no pacote `contracanto/`:
+Instalado, o pacote oferece os comandos `contracanto` e `contracanto-mcp`. `examples/` traz um plano ilustrativo e o plano e a verificação do smoke. Toda a lógica fica no pacote `contracanto/`:
 
 | Módulo | Responsabilidade |
 | --- | --- |
@@ -228,3 +228,7 @@ Nenhum módulo guarda estado global: o repositório e o diretório de execuçõe
 `pyproject.toml` é a única declaração das dependências diretas (`mcp` e, no Windows, `pywin32`) e das ferramentas de desenvolvimento (`ruff` e `mypy`, no extra `dev`), além do pacote e de seus comandos. `requirements.lock.txt` fixa também as transitivas do ambiente validado; use-o na instalação e na CI. Para desenvolver, instale o lock e depois `python -m pip install -e ".[dev]"`. A CI confere com `scripts/check_lock.py` que o lock fixa as mesmas versões declaradas em `pyproject.toml` e executa `ruff check .`, `ruff format --check .` e `mypy` além dos testes, pelo executor paralelo. O `mypy` confere o pacote, `scripts/` e `tests/`. A versão do pacote fica em `contracanto/__init__.py`. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
 
 A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Continuação automática após crash e orçamento de tokens/custo continuam fora do escopo deste protótipo; a reserva e a recuperação manual continuam obrigatórias nesses casos.
+
+## Licença
+
+[MIT](LICENSE).

@@ -379,6 +379,30 @@ class IntegrationGateTests(support.RepositoryTestCase):
                 self.assertEqual(status['target'], {'branch': 'refs/heads/contracanto/lote', 'base': base})
                 self.assertFalse((store / 'run.lock').exists())
 
+    def test_integration_branch_without_commits_is_dropped(self):
+        for start in ((), ('switch', '--detach')):
+            with self.subTest(start=start), self.repository() as (root, store, base, task, git):
+                if start:
+                    git(*start)
+                with patch.object(agents, 'run_agy', side_effect=RuntimeError('executor failed')):
+                    states = runner.execute(
+                        self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'], branch='contracanto/lote'
+                    )
+                self.assertEqual(states, {'A': 'failed'})
+                self.assertEqual(git('branch', '--show-current').stdout.strip(), '' if start else 'main')
+                self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
+                self.assertEqual(git('branch', '--list', 'contracanto/lote').stdout.strip(), '')
+                self.assertTrue(support.read_status(self.ws)['target']['branch_removed'])
+                self.assertFalse((store / 'run.lock').exists())
+
+    def test_integration_branch_is_kept_when_recovery_is_required(self):
+        with self.repository() as (root, store, base, task, git):
+            with patch.object(agents, 'run_agy', side_effect=support.errors.RecoveryRequired('processo vivo')):
+                runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'], branch='lote')
+            self.assertEqual(git('branch', '--show-current').stdout.strip(), 'lote')
+            self.assertNotIn('branch_removed', support.read_status(self.ws)['target'])
+            self.assertTrue((store / 'run.lock').exists())
+
     def test_invalid_or_existing_integration_branch_fails_the_preflight(self):
         for name, expected in (('nome inválido..', 'inválido'), ('main', 'Não foi possível criar')):
             with self.subTest(name=name), self.repository() as (root, store, base, task, git):

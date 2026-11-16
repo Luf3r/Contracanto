@@ -54,7 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--repo',
         type=Path,
-        help=f'Repositório Git a orquestrar. Padrão: variável {state.REPO_ENV}, o projeto desta cópia ou o diretório atual.',
+        help=f'Repositório Git a orquestrar. Padrão: variável {state.REPO_ENV} ou o diretório atual.',
     )
     parser.add_argument(
         '--keep-worktrees',

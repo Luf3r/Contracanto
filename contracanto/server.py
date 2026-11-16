@@ -258,3 +258,7 @@ def get_submitted_plan() -> str:
 
 def main() -> None:
     mcp.run(transport='stdio')
+
+
+if __name__ == '__main__':
+    main()

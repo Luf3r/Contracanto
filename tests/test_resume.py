@@ -75,6 +75,24 @@ class ResumeTests(support.RepositoryTestCase):
                 with self.assertRaisesRegex(RuntimeError, 'A tarefa A .* não está no HEAD'):
                     maintenance.resume_plan(self.ws)
 
+    def test_resume_refuses_an_unapproved_task_whose_commit_is_in_head(self):
+        with self.repository() as (root, store, base, task, git):
+            for _ in self.first_run(task):
+                # Simula o worker encerrado entre o cherry-pick e a aprovação de B.
+                (root / 'b.txt').write_text('b.txt')
+                git('add', '.')
+                git('commit', '-m', 'B: integrado sem registro')
+                commit = git('rev-parse', 'HEAD').stdout.strip()
+                run_id = self.ws.latest_run_id()
+                status = support.read_status(self.ws)
+                status['details'].setdefault('B', {})['integrated_commit'] = commit
+                st.write_json(self.ws.status(run_id), status)
+                with self.assertRaisesRegex(RuntimeError, f'A tarefa B .*{commit[:12]}'):
+                    maintenance.resume_plan(self.ws)
+                # Depois do git revert, a tarefa pode ser refeita.
+                git('revert', '--no-edit', commit)
+                self.assertEqual([item['id'] for item in maintenance.resume_plan(self.ws)['tasks']], ['B', 'C'])
+
     def test_resume_by_run_id_and_refusals(self):
         with self.repository() as (root, store, base, task, git):
             for _ in self.first_run(task):

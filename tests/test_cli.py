@@ -101,3 +101,24 @@ class EntryPointTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)['reservation_state'], 'none')
+
+
+class DefaultRepositoryTests(unittest.TestCase):
+    def test_repository_comes_from_the_argument_the_variable_or_the_current_directory(self):
+        with support.temp_dir() as directory:
+            other = directory / 'outro'
+            other.mkdir()
+            with patch.dict('os.environ', {st.REPO_ENV: str(other)}):
+                self.assertEqual(st.default_workspace(directory).root, directory.resolve())
+                self.assertEqual(st.default_workspace().root, other.resolve())
+            with patch.dict('os.environ'), patch.object(st.Path, 'cwd', return_value=directory):
+                st.os.environ.pop(st.REPO_ENV, None)
+                self.assertEqual(st.default_workspace().root, directory.resolve())
+            with self.assertRaisesRegex(ValueError, 'não encontrado'):
+                st.default_workspace(directory / 'ausente')
+
+    def test_server_module_can_be_run_without_the_installed_command(self):
+        code = 'import runpy, contracanto.server as s; s.FastMCP.run = lambda *a, **k: print("ok")'
+        code += '; s.mcp.run = lambda **k: print("ok"); s.main()'
+        result = subprocess.run([sys.executable, '-c', code], env=server.worker_env(), capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), 'ok', result.stderr)
