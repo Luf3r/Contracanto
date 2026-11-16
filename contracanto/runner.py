@@ -1,11 +1,17 @@
-"""Ciclo de uma execução: agenda lotes, revisa, integra e registra o resultado."""
+"""Ciclo de uma execução: agenda lotes, revisa, integra e registra o resultado.
+
+Implementação e revisão rodam em paralelo, cada tarefa no próprio worktree.
+A integração na branch de destino é sempre serial.
+"""
 
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import json
+import os
 import shutil
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from . import agents, config, gitops, state
@@ -13,7 +19,7 @@ from .agents import Artifact
 from .errors import IntegrationStateError, RecoveryRequired, RunCancelled, describe, recovery_on_failure
 from .gitops import TargetCheckout
 from .plan import Plan, Task, overlaps, validate
-from .state import RunContext, Workspace
+from .state import RunContext, TaskStatus, Workspace
 
 
 def execute(
@@ -24,7 +30,7 @@ def execute(
     tests: Sequence[str] | None,
     reservation: str | None = None,
     keep_worktrees: bool = False,
-) -> dict[str, str]:
+) -> dict[str, TaskStatus]:
     """Assume a reserva, executa o plano e grava o estado final.
 
     A reserva só é liberada quando o repositório está em estado conhecido.
@@ -43,6 +49,9 @@ def execute(
         raise RecoveryRequired(
             'Não foi possível assumir a reserva; inspecione run.lock e o diretório da execução'
         ) from error
+    # Diagnóstico para --unlock; a execução não depende dele.
+    with contextlib.suppress(OSError):
+        ws.worker_pid(run_id).write_text(str(os.getpid()), encoding='utf-8')
     ctx = RunContext.open(ws, run_id, keep_worktrees)
     run = ctx.state
     keep_lock = False
@@ -56,14 +65,14 @@ def execute(
         ctx.stop.check()
         result = _execute(ctx, loaded, max_workers, retries, tests)
         keep_lock = run.recovery_required
-        run.state = 'completed' if all(status == 'approved' for status in result.values()) else 'failed'
+        run.finish('completed' if all(status == 'approved' for status in result.values()) else 'failed')
         run.save()
         return result
     except (Exception, KeyboardInterrupt) as error:
         # A later persistence error must never clear an earlier recovery flag.
         keep_lock = keep_lock or run.recovery_required or isinstance(error, RecoveryRequired)
         cancelled = isinstance(error, RunCancelled) and not keep_lock
-        run.state = 'cancelled' if cancelled else 'failed'
+        run.finish('cancelled' if cancelled else 'failed')
         run.error = describe(error)
         run.recovery_required = keep_lock
         run.close_unfinished('cancelled' if cancelled else 'blocked')
@@ -76,7 +85,7 @@ def execute(
 
 def _execute(
     ctx: RunContext, plan: Plan, max_workers: int, retries: int, tests: Sequence[str] | None
-) -> dict[str, str]:
+) -> dict[str, TaskStatus]:
     validate(plan)
     config.check_limits(max_workers, retries)
     if not tests:
@@ -97,7 +106,7 @@ def _execute(
         raise
 
 
-def schedule_batch(tasks: Sequence[Task], statuses: dict[str, str], max_workers: int) -> list[Task]:
+def schedule_batch(tasks: Sequence[Task], statuses: Mapping[str, TaskStatus], max_workers: int) -> list[Task]:
     """Tarefas prontas que podem rodar juntas sem disputar os mesmos arquivos."""
     ready = [
         task
@@ -116,7 +125,7 @@ def schedule_batch(tasks: Sequence[Task], statuses: dict[str, str], max_workers:
     return batch
 
 
-def block_descendants(tasks: Sequence[Task], statuses: dict[str, str]) -> None:
+def block_descendants(tasks: Sequence[Task], statuses: dict[str, TaskStatus]) -> None:
     """Uma falha bloqueia todas as tarefas que dependem dela, direta ou indiretamente."""
     while True:
         blocked = [
@@ -132,11 +141,12 @@ def block_descendants(tasks: Sequence[Task], statuses: dict[str, str]) -> None:
 
 def _run_tasks(
     ctx: RunContext, plan: Plan, max_workers: int, retries: int, tests: Sequence[str], target: TargetCheckout
-) -> dict[str, str]:
+) -> dict[str, TaskStatus]:
     run = ctx.state
     tasks = plan['tasks']
     run.state = 'running'
-    run.statuses.update({task['id']: 'pending' for task in tasks})
+    for task in tasks:
+        run.mark(task['id'], 'pending')
     run.save()
     for _ in range(len(tasks)):
         batch = schedule_batch(tasks, run.statuses, max_workers)
@@ -152,14 +162,59 @@ def _run_tasks(
         if run.recovery_required:
             return run.statuses
         ctx.stop.check()
-        for artifact in artifacts:
-            review_and_integrate(ctx, artifact, base, context, retries, tests, target)
+        approved = review_batch(ctx, artifacts, base, context, retries, tests, max_workers)
+        if run.recovery_required:
+            return run.statuses
+        for artifact, feedback in approved:
+            integrate_task(ctx, artifact, base, feedback, tests, target)
             if run.recovery_required:
                 return run.statuses
     block_descendants(tasks, run.statuses)
     run.save()
     target.verify()
     return run.statuses
+
+
+def _run_parallel[Item](
+    items: Sequence[Item],
+    work: Callable[[Item], object],
+    max_workers: int,
+    collect: Callable[[Item, concurrent.futures.Future], None],
+) -> None:
+    """Executa `work` para cada item em threads e entrega cada resultado a `collect`.
+
+    Uma falha ao submeter ou coletar aguarda e inspeciona todos os workers já
+    iniciados: se algum deixou o estado incerto, ou se nem todos foram submetidos,
+    a execução exige recuperação.
+    """
+    jobs: dict[concurrent.futures.Future, Item] = {}
+    collected: set[concurrent.futures.Future] = set()
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        with pool:
+            for item in items:
+                jobs[pool.submit(work, item)] = item
+            for future in concurrent.futures.as_completed(jobs):
+                collected.add(future)
+                collect(jobs[future], future)
+    except (Exception, KeyboardInterrupt) as interruption:
+        with recovery_on_failure('Espera dos workers interrompida; encerramento não confirmado'):
+            pool.shutdown(wait=True)
+        recovery_error = None
+        for future, item in jobs.items():
+            failure = future.exception()
+            if isinstance(failure, RecoveryRequired):
+                recovery_error = failure
+            if future not in collected:
+                with contextlib.suppress(Exception):
+                    collect(item, future)
+        if recovery_error is not None:
+            raise RecoveryRequired(
+                f'Execução interrompida com recuperação pendente: {recovery_error}'
+            ) from interruption
+        if len(jobs) != len(items):
+            raise RecoveryRequired('Submissão dos workers interrompida; resultados incompletos') from interruption
+        raise
 
 
 def run_batch(ctx: RunContext, batch: Sequence[Task], base: str, context: str, max_workers: int) -> list[Artifact]:
@@ -170,49 +225,29 @@ def run_batch(ctx: RunContext, batch: Sequence[Task], base: str, context: str, m
     """
     run = ctx.state
     for task in batch:
-        run.statuses[task['id']] = 'running'
+        run.mark(task['id'], 'running')
     run.save()
-    jobs: dict[concurrent.futures.Future, Task] = {}
     artifacts: list[Artifact] = []
     recovery_error: BaseException | None = None
 
-    def record_failure(task: Task, error: BaseException) -> None:
-        nonlocal recovery_error
-        run.statuses[task['id']] = 'failed'
-        run.details[task['id']] = {'error': str(error)}
-        if isinstance(error, RecoveryRequired):
-            recovery_error = error
+    def implement(task: Task) -> Artifact:
+        with run.phase(task['id'], 'implementation'):
+            return agents.run_executor(ctx, task, base, context)
 
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    try:
-        with pool:
-            for task in batch:
-                jobs[pool.submit(agents.run_executor, ctx, task, base, context)] = task
-            for future in concurrent.futures.as_completed(jobs):
-                task = jobs[future]
-                try:
-                    artifact = future.result()
-                    run.statuses[task['id']] = 'review'
-                    artifacts.append(artifact)
-                except RunCancelled:
-                    run.statuses[task['id']] = 'cancelled'
-                except Exception as error:
-                    record_failure(task, error)
-    except (Exception, KeyboardInterrupt) as interruption:
-        # Submission/collection failures must also inspect existing workers.
-        with recovery_on_failure('Espera dos workers interrompida; encerramento não confirmado'):
-            pool.shutdown(wait=True)
-        for future, task in jobs.items():
-            failure = future.exception()
-            if failure is not None:
-                record_failure(task, failure)
-        if recovery_error is not None:
-            raise RecoveryRequired(
-                f'Execução interrompida com recuperação pendente: {recovery_error}'
-            ) from interruption
-        if len(jobs) != len(batch):
-            raise RecoveryRequired('Submissão dos workers interrompida; resultados incompletos') from interruption
-        raise
+    def collect(task: Task, future: concurrent.futures.Future) -> None:
+        nonlocal recovery_error
+        try:
+            artifacts.append(future.result())
+            run.mark(task['id'], 'review')
+        except RunCancelled:
+            run.mark(task['id'], 'cancelled')
+        except Exception as error:
+            run.mark(task['id'], 'failed')
+            run.set_details(task['id'], {'error': str(error)})
+            if isinstance(error, RecoveryRequired):
+                recovery_error = error
+
+    _run_parallel(batch, implement, max_workers, collect)
     if recovery_error is not None:
         run.require_recovery()
         return []
@@ -220,42 +255,101 @@ def run_batch(ctx: RunContext, batch: Sequence[Task], base: str, context: str, m
     return artifacts
 
 
-def review_and_integrate(
+def review_task(
+    ctx: RunContext, artifact: Artifact, base: str, context: str, retries: int, tests: Sequence[str]
+) -> str | None:
+    """Revisa o candidato e pede correções quando rejeitado.
+
+    Devolve o parecer quando aprovado, ou None depois de registrar a falha.
+    RunCancelled e RecoveryRequired são propagados depois de registrados.
+    """
+    run = ctx.state
+    task = artifact.task
+    task_id = task['id']
+    run.set_details(task_id, {'worktree': artifact.worktree, 'commit': artifact.commit})
+    feedback = ''
+    try:
+        for attempt in range(retries + 1):
+            ctx.stop.check()
+            gitops.check_scope(task, Path(artifact.worktree), base)
+            with run.phase(task_id, 'review'):
+                approved, feedback, _ = agents.review(task, artifact, tests, ctx.stop)
+            if approved:
+                return feedback
+            if attempt == retries:
+                raise RuntimeError('Rejeitado após tentativas: ' + feedback[-config.ERROR_TAIL :])
+            with run.phase(task_id, 'repair'):
+                agents.repair(ctx, artifact, base, context, feedback)
+            run.update_details(task_id, commit=artifact.commit)
+    except RunCancelled:
+        raise
+    except Exception as error:
+        run.mark(task_id, 'failed')
+        run.update_details(task_id, error=str(error), review=feedback)
+        if isinstance(error, RecoveryRequired):
+            raise
+        run.save()
+    return None
+
+
+def review_batch(
     ctx: RunContext,
-    artifact: Artifact,
+    artifacts: Sequence[Artifact],
     base: str,
     context: str,
     retries: int,
     tests: Sequence[str],
-    target: TargetCheckout,
-) -> None:
-    """Revisa o candidato, pede correções quando rejeitado e integra quando aprovado."""
+    max_workers: int,
+) -> list[tuple[Artifact, str]]:
+    """Revisa os candidatos em paralelo; devolve os aprovados na ordem recebida."""
     run = ctx.state
-    task = artifact.task
-    task_id = task['id']
-    run.details[task_id] = {'worktree': artifact.worktree, 'commit': artifact.commit}
-    feedback = ''
-    for attempt in range(retries + 1):
+    verdicts: dict[str, str] = {}
+    cancelled: RunCancelled | None = None
+    recovery_error: RecoveryRequired | None = None
+
+    def collect(artifact: Artifact, future: concurrent.futures.Future) -> None:
+        nonlocal cancelled, recovery_error
         try:
-            ctx.stop.check()
-            gitops.check_scope(task, Path(artifact.worktree), base)
-            approved, feedback, _ = agents.review(task, artifact, tests, ctx.stop)
-            if approved:
-                integrate(ctx, artifact, base, feedback, tests, target)
-                break
-            if attempt == retries:
-                raise RuntimeError('Rejeitado após tentativas: ' + feedback[-config.ERROR_TAIL :])
-            agents.repair(ctx, artifact, base, context, feedback)
-        except (RunCancelled, IntegrationStateError):
-            raise
-        except Exception as error:
-            run.statuses[task_id] = 'failed'
-            run.details[task_id].update(error=str(error), review=feedback)
-            if isinstance(error, RecoveryRequired):
-                run.require_recovery()
-                return
-            break
-    if run.statuses[task_id] != 'approved':
+            feedback = future.result()
+        except RunCancelled as error:
+            cancelled = error
+        except RecoveryRequired as error:
+            recovery_error = error
+        else:
+            if feedback is not None:
+                verdicts[artifact.task['id']] = feedback
+
+    _run_parallel(
+        artifacts,
+        lambda artifact: review_task(ctx, artifact, base, context, retries, tests),
+        max_workers,
+        collect,
+    )
+    if recovery_error is not None:
+        run.require_recovery()
+        return []
+    if cancelled is not None:
+        raise cancelled
+    return [(artifact, verdicts[artifact.task['id']]) for artifact in artifacts if artifact.task['id'] in verdicts]
+
+
+def integrate_task(
+    ctx: RunContext, artifact: Artifact, base: str, feedback: str, tests: Sequence[str], target: TargetCheckout
+) -> None:
+    """Integra um candidato aprovado e registra uma eventual falha."""
+    run = ctx.state
+    task_id = artifact.task['id']
+    try:
+        with run.phase(task_id, 'integration'):
+            integrate(ctx, artifact, base, feedback, tests, target)
+    except (RunCancelled, IntegrationStateError):
+        raise
+    except Exception as error:
+        run.mark(task_id, 'failed')
+        run.update_details(task_id, error=str(error), review=feedback)
+        if isinstance(error, RecoveryRequired):
+            run.require_recovery()
+            return
         run.save()
 
 
@@ -274,7 +368,7 @@ def integrate(
     run = ctx.state
     root = ctx.root
     task = artifact.task
-    details = run.details[task['id']]
+    task_id = task['id']
     target.verify()
     candidate = artifact.candidate
     # Earlier tasks in a parallel batch may have changed the destination tree.
@@ -285,7 +379,7 @@ def integrate(
         merged_tree = gitops.git('merge-tree', '--write-tree', target.head, candidate, cwd=root).stdout.strip()
     gitops.check_tree_scope(task, root, target.head, merged_tree)
     gitops.protect_untracked_files(root, target.head, merged_tree)
-    details.update(commit=candidate, target_before=target.head, review=feedback)
+    run.update_details(task_id, commit=candidate, target_before=target.head, review=feedback)
     run.save()
     ctx.stop.check()
     # O comando pode ter aplicado o commit antes de perdermos seu resultado.
@@ -296,7 +390,7 @@ def integrate(
         raise RuntimeError('Conflito ao integrar commit; requer intervenção ou replanejamento')
     with recovery_on_failure('Não foi possível identificar o HEAD integrado'):
         integrated_head = gitops.head(root)
-    details['integrated_commit'] = integrated_head
+    run.update_details(task_id, integrated_commit=integrated_head)
     _persist_integration(ctx)
     with recovery_on_failure('Escopo do commit integrado não confirmado'):
         gitops.check_tree_scope(task, root, target.head, integrated_head)
@@ -311,30 +405,29 @@ def integrate(
     except RecoveryRequired:
         raise
     except (Exception, KeyboardInterrupt) as integration_error:
-        _rollback(ctx, details, integrated_head, target)
+        _rollback(ctx, task_id, integrated_head, target)
         if isinstance(integration_error, (KeyboardInterrupt, RunCancelled)):
             raise
         raise RuntimeError(f'Integração revertida: {integration_error}') from integration_error
-    run.statuses[task['id']] = 'approved'
+    run.mark(task_id, 'approved')
     _persist_integration(ctx)
     target.head = integrated_head
     if not ctx.keep_worktrees:
-        _discard_worktree(root, artifact, details)
+        _discard_worktree(ctx, artifact)
 
 
-def _discard_worktree(root: Path, artifact: Artifact, details: dict) -> None:
+def _discard_worktree(ctx: RunContext, artifact: Artifact) -> None:
     """Remove o worktree e a branch de uma tarefa já integrada.
 
     É apenas limpeza: uma falha fica registrada e não altera o resultado da tarefa.
     O Git recusa remover um worktree com alterações, que então permanece para inspeção.
     """
+    task_id = artifact.task['id']
     try:
-        gitops.git('worktree', 'remove', artifact.worktree, cwd=root)
-        if artifact.branch:
-            gitops.git('branch', '-D', artifact.branch.removeprefix('refs/heads/'), cwd=root)
-        details['worktree_removed'] = True
+        gitops.remove_worktree(ctx.root, artifact.worktree, artifact.branch)
+        ctx.state.update_details(task_id, worktree_removed=True)
     except Exception as error:
-        details['cleanup_error'] = str(error)
+        ctx.state.update_details(task_id, cleanup_error=str(error))
 
 
 def _abort_cherry_pick(root: Path, target: TargetCheckout) -> None:
@@ -348,7 +441,7 @@ def _abort_cherry_pick(root: Path, target: TargetCheckout) -> None:
     target.verify()
 
 
-def _rollback(ctx: RunContext, details: dict, integrated_head: str, target: TargetCheckout) -> None:
+def _rollback(ctx: RunContext, task_id: str, integrated_head: str, target: TargetCheckout) -> None:
     """Reverte a integração com um novo commit, sem reescrever o histórico."""
     root = ctx.root
     gitops.check_revision(root, integrated_head, target.branch, recovery=True)
@@ -360,6 +453,6 @@ def _rollback(ctx: RunContext, details: dict, integrated_head: str, target: Targ
     with recovery_on_failure('Não foi possível identificar o HEAD após revert'):
         reverted_head = gitops.head(root)
     gitops.check_revision(root, reverted_head, target.branch, recovery=True)
-    details['revert_commit'] = reverted_head
+    ctx.state.update_details(task_id, revert_commit=reverted_head)
     _persist_integration(ctx)
     target.head = reverted_head

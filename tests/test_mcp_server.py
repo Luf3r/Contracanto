@@ -9,8 +9,7 @@ from unittest.mock import patch
 
 import support
 
-import mcp_server as server
-from contracanto import agents, cli, errors, gitops, runner
+from contracanto import agents, cli, errors, gitops, runner, server
 from contracanto import process as proc
 from contracanto import state as st
 
@@ -144,7 +143,7 @@ class SubmissionTests(unittest.TestCase):
     def test_only_first_mcp_worker_can_claim_or_release_reservation(self):
         with support.temp_workspace(server) as ws, patch.object(server.subprocess, 'Popen') as launch:
             server.submit_plan(PLAN, test_command_json='["test"]')
-            argv = launch.call_args.args[0][2:]
+            argv = launch.call_args.args[0][3:]
             credential = argv[argv.index('--reservation') + 1]
             public_id = support.read_status(ws)['run_id']
             source = ws.plan(public_id)

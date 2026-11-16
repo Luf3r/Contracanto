@@ -227,6 +227,13 @@ def check_revision(
     return branch
 
 
+def remove_worktree(root: Path, worktree: str | Path, branch: str | None) -> None:
+    """Remove um worktree limpo e a branch dele; o Git recusa worktrees com alterações."""
+    git('worktree', 'remove', str(worktree), cwd=root)
+    if branch and branch != 'HEAD':
+        git('branch', '-D', branch.removeprefix('refs/heads/'), cwd=root)
+
+
 def check_checkout(wt: str | Path, expected_head: str, expected_branch: str | None) -> None:
     """O executor não pode trocar de branch nem criar commits por conta própria."""
     check_git_operation(wt)

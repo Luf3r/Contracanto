@@ -2,22 +2,35 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
+import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .errors import RecoveryRequired, RunCancelled
 
-TERMINAL_STATES = ('completed', 'failed', 'cancelled')
-UNFINISHED_STATUSES = ('pending', 'running', 'review')
+RunStatus = Literal['starting', 'running', 'completed', 'failed', 'cancelled']
+TaskStatus = Literal['pending', 'running', 'review', 'approved', 'failed', 'blocked', 'cancelled']
+Phase = Literal['implementation', 'review', 'repair', 'integration']
+
+TERMINAL_STATES: tuple[RunStatus, ...] = ('completed', 'failed', 'cancelled')
+UNFINISHED_STATUSES: tuple[TaskStatus, ...] = ('pending', 'running', 'review')
+FINISHED_STATUSES: tuple[TaskStatus, ...] = ('approved', 'failed', 'blocked', 'cancelled')
 RUN_ID = re.compile('[0-9a-f]{64}')
+
+
+def now() -> str:
+    """Instante atual em ISO 8601, UTC, com precisão de segundos."""
+    return datetime.now(UTC).isoformat(timespec='seconds')
 
 
 @dataclass(frozen=True)
@@ -63,6 +76,26 @@ class Workspace:
         """Diretório criado uma única vez pelo worker que assume a execução."""
         return self.run_dir(run_id) / 'claim'
 
+    def worker_pid(self, run_id: str) -> Path:
+        """PID gravado pelo worker ao assumir a execução, pela CLI ou pelo MCP."""
+        return self.claim(run_id) / 'pid'
+
+    def run_ids(self) -> list[str]:
+        """Execuções registradas, da mais antiga para a mais recente."""
+        runs = self.store / 'runs'
+        if not runs.is_dir():
+            return []
+        found = [path.name for path in runs.iterdir() if path.is_dir() and RUN_ID.fullmatch(path.name)]
+
+        def started(run_id: str) -> float:
+            # plan.json é gravado uma vez no início; o diretório muda a cada atualização de estado.
+            for path in (self.plan(run_id), self.run_dir(run_id)):
+                with contextlib.suppress(OSError):
+                    return path.stat().st_mtime
+            return 0.0
+
+        return sorted(found, key=started)
+
     def latest_run_id(self) -> str | None:
         try:
             run_id = self.latest.read_text(encoding='utf-8').strip()
@@ -81,10 +114,17 @@ class Workspace:
 REPO_ENV = 'CONTRACANTO_REPO'
 
 
+def _installation_root() -> Path | None:
+    """Diretório do projeto quando o pacote foi copiado para dentro dele (não instalado)."""
+    parent = Path(__file__).resolve().parent.parent
+    return parent if (parent / 'orchestrator.py').is_file() else None
+
+
 def default_workspace(repo: str | Path | None = None) -> Workspace:
-    """Repositório orquestrado: `repo`, a variável CONTRACANTO_REPO ou,
-    na ausência de ambos, o diretório que contém este pacote."""
-    root = Path(repo or os.environ.get(REPO_ENV) or Path(__file__).resolve().parent.parent)
+    """Repositório orquestrado: `repo`, a variável CONTRACANTO_REPO, o projeto que
+    contém esta cópia do pacote ou, com o pacote instalado, o diretório atual."""
+    root = Path(repo or os.environ.get(REPO_ENV) or _installation_root() or Path.cwd())
+
     if not root.is_dir():
         raise ValueError(f'Repositório não encontrado: {root}')
     return Workspace.for_root(root)
@@ -125,42 +165,100 @@ def write_json(path: Path, obj: Mapping[str, Any]) -> None:
 
 
 class RunState:
-    """Único escritor de status.json; a cópia em memória é a fonte da verdade."""
+    """Único escritor de status.json; a cópia em memória é a fonte da verdade.
+
+    Workers em paralelo atualizam o estado pelos métodos desta classe, que
+    serializam as alterações e a gravação.
+    """
 
     def __init__(self, path: Path, run_id: str):
         self.path = path
         self.run_id = run_id
-        self.state = 'starting'
-        self.statuses: dict[str, str] = {}
+        self.state: RunStatus = 'starting'
+        self.statuses: dict[str, TaskStatus] = {}
         self.details: dict[str, dict[str, Any]] = {}
+        self.timings: dict[str, dict[str, Any]] = {}
         self.recovery_required = False
         self.error: str | None = None
+        self.started_at = now()
+        self.finished_at: str | None = None
+        self._started = time.monotonic()
+        self._ended: float | None = None
+        self._lock = threading.RLock()
 
     def snapshot(self) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            'state': self.state,
-            'run_id': self.run_id,
-            'statuses': self.statuses,
-            'details': self.details,
-            'recovery_required': self.recovery_required,
-        }
-        if self.error is not None:
-            data['error'] = self.error
-        return data
+        with self._lock:
+            data: dict[str, Any] = {
+                'state': self.state,
+                'run_id': self.run_id,
+                'started_at': self.started_at,
+                'updated_at': now(),
+                'finished_at': self.finished_at,
+                'duration_seconds': round((self._ended or time.monotonic()) - self._started, 1),
+                'statuses': self.statuses,
+                'details': self.details,
+                'timings': self.timings,
+                'recovery_required': self.recovery_required,
+            }
+            if self.error is not None:
+                data['error'] = self.error
+            # Uma cópia independente: a gravação não pode observar uma alteração pela metade.
+            return json.loads(json.dumps(data))
 
     def save(self) -> None:
-        write_json(self.path, self.snapshot())
+        with self._lock:
+            write_json(self.path, self.snapshot())
 
-    def close_unfinished(self, status: str = 'blocked') -> None:
-        for task_id, value in self.statuses.items():
-            if value in UNFINISHED_STATUSES:
-                self.statuses[task_id] = status
+    def mark(self, task_id: str, status: TaskStatus) -> None:
+        """Muda o estado de uma tarefa e registra quando ela começou e terminou."""
+        with self._lock:
+            self.statuses[task_id] = status
+            timing = self.timings.setdefault(task_id, {'phases': {}})
+            if status not in ('pending', *FINISHED_STATUSES):
+                timing.setdefault('started_at', now())
+            if status in FINISHED_STATUSES and 'started_at' in timing:
+                timing['finished_at'] = now()
+
+    def update_details(self, task_id: str, **fields: Any) -> None:
+        with self._lock:
+            self.details.setdefault(task_id, {}).update(fields)
+
+    def set_details(self, task_id: str, fields: dict[str, Any]) -> None:
+        with self._lock:
+            self.details[task_id] = fields
+
+    @contextlib.contextmanager
+    def phase(self, task_id: str, name: Phase) -> Iterator[None]:
+        """Acumula o tempo gasto em uma fase da tarefa, mesmo quando ela falha."""
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            elapsed = time.monotonic() - started
+            with self._lock:
+                phases = self.timings.setdefault(task_id, {'phases': {}})['phases']
+                entry = phases.setdefault(name, {'seconds': 0.0, 'count': 0})
+                entry['seconds'] = round(entry['seconds'] + elapsed, 1)
+                entry['count'] += 1
+
+    def finish(self, state: RunStatus) -> None:
+        with self._lock:
+            self.state = state
+            self.finished_at = now()
+            self._ended = time.monotonic()
+
+    def close_unfinished(self, status: TaskStatus = 'blocked') -> None:
+        with self._lock:
+            for task_id, value in list(self.statuses.items()):
+                if value in UNFINISHED_STATUSES:
+                    self.mark(task_id, status)
 
     def require_recovery(self) -> None:
         """Nenhuma outra tarefa pode prosseguir até a inspeção manual."""
-        self.recovery_required = True
-        self.close_unfinished()
-        self.save()
+        with self._lock:
+            self.recovery_required = True
+            self.close_unfinished()
+            self.save()
 
 
 @dataclass

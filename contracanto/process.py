@@ -57,6 +57,24 @@ if sys.platform == 'win32':
         """Opções de Popen para um worker que sobrevive ao processo que o lançou."""
         return {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
 
+    def pid_alive(pid: int) -> bool:
+        """Se existe processo com este PID. Na dúvida, responde que sim."""
+        # os.kill(pid, 0) encerraria o processo no Windows; consulta o código de saída.
+        import pywintypes
+        import win32api
+        import win32con
+        import win32process
+
+        try:
+            handle = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        except pywintypes.error as error:
+            # ERROR_INVALID_PARAMETER: nenhum processo com esse PID.
+            return error.winerror != 87
+        try:
+            return win32process.GetExitCodeProcess(handle) == win32con.STILL_ACTIVE
+        finally:
+            handle.Close()
+
 else:
 
     def kill_posix_group(pid: int) -> None:
@@ -102,6 +120,16 @@ else:
     def detached_options() -> dict[str, Any]:
         """Opções de Popen para um worker que sobrevive ao processo que o lançou."""
         return {'start_new_session': True}
+
+    def pid_alive(pid: int) -> bool:
+        """Se existe processo com este PID. Na dúvida, responde que sim."""
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
 
 
 def _communicate(process: subprocess.Popen, input_data, timeout: float, stop: StopSignal | None, args):

@@ -17,6 +17,14 @@ O status expõe o identificador público da execução. O worker usa uma credenc
 - `reservation`: `run_id`, `pid` e `stop_requested` da reserva ativa, ou `null`.
 - `log`: as últimas linhas do log do worker lançado pelo MCP.
 
+Além de `state`, `run_id`, `statuses`, `details`, `recovery_required` e `error`, o `status.json` registra o tempo:
+
+- `started_at`, `updated_at` e `finished_at`: horários em ISO 8601, UTC; `finished_at` é `null` até o estado final.
+- `duration_seconds`: duração da execução até a última gravação ou até o estado final.
+- `timings.<id>`: `started_at` e `finished_at` da tarefa e, em `phases`, os segundos acumulados e o número de vezes de cada fase (`implementation`, `review`, `repair`, `integration`). Uma tarefa bloqueada antes de começar não tem `started_at`.
+
+`py orchestrator.py --status` imprime o mesmo objeto que `get_run_status()`.
+
 Se a reserva for removida durante a consulta, `reservation_state` volta a `none`. `submit_plan` responde com um texto iniciado por `Erro:` quando a entrada é inválida ou já existe execução reservada, sem iniciar nada; falhas ao lançar o worker são reportadas como erro da ferramenta. Se não conseguir gravar `pid.txt` após iniciar o worker, `submit_plan` confirma o início e retorna um aviso com o PID correto; a execução continua e a reserva permanece sob controle do worker. Nesse caso, `pid.txt` pode estar ausente ou incompleto: use o PID da resposta para inspeção.
 
 As atualizações de estado substituem o JSON de forma atômica. Se uma consulta no Windows bloquear a substituição do JSON ou a remoção de `run.lock`, o processo tenta novamente por até um segundo. Antes de cada tentativa de remoção, ele confere a identidade da reserva. Se a primeira gravação de `starting` falhar, o diagnóstico da nova execução usa listas de tarefas e detalhes vazias. Uma recuperação já exigida mantém a reserva mesmo se houver erro ao salvar o estado final ou ao ler o estado da execução em curso.
@@ -47,9 +55,9 @@ Após encerramento abrupto:
 
 1. Leia `run.log`, `status.json` e `pid.txt` (PID do worker MCP) em `.agent-runs/runs/<run_id>/`; o `run_id` está em `.agent-runs/run.lock`. Se a submissão avisou que não conseguiu gravar `pid.txt`, use o PID informado na resposta do MCP. Confirme no Gerenciador de Tarefas que o worker e seus subprocessos terminaram. A reserva também registra o PID do processo que a criou, que no MCP é o servidor.
 2. Inspecione `git status`, `git log -5 --oneline` e `git worktree list`. Preserve alterações e resolva operações Git pendentes antes de começar outra execução. Não há retomada automática.
-3. **Somente após confirmar que não há execução ativa**, remova a reserva com `Remove-Item -LiteralPath .agent-runs/run.lock`. Não remova uma reserva ativa.
+3. Libere a reserva com `py orchestrator.py --unlock`. O comando confere se o worker da execução ainda está vivo (pelo PID que ele grava em `runs/<run_id>/claim/pid` ao assumir a execução, ou pelo `pid.txt` do MCP), se há operação Git pendente e se o repositório tem alterações, e recusa em qualquer desses casos. Ao liberar, marca a execução como `failed` se ela não tinha estado final e registra `unlocked_at`. Um PID reaproveitado por outro processo também causa recusa; confirme no Gerenciador de Tarefas e, só então, remova `.agent-runs/run.lock` manualmente.
 4. Corrija a causa, confira a branch e o Git limpo, ajuste o plano se necessário e submeta novamente.
 
-Para liberar um worktree antigo após inspecioná-lo, use `git worktree remove "CAMINHO_EXATO"`. O Git recusa worktrees sujos; preserve o trabalho antes de removê-los. As branches `agent/*` desses worktrees são mantidas e podem ser removidas manualmente com `git branch -D` quando não forem mais necessárias.
+Para remover os registros de execuções antigas, com seus worktrees e branches `agent/*`, use `py orchestrator.py --prune-runs N`, que mantém as N mais recentes. Para liberar um único worktree após inspecioná-lo, use `git worktree remove "CAMINHO_EXATO"`. O Git recusa worktrees sujos; preserve o trabalho antes de removê-los. As branches `agent/*` desses worktrees são mantidas e podem ser removidas manualmente com `git branch -D` quando não forem mais necessárias.
 
 Diagnóstico rápido: erro `not a git repository` exige executar na raiz Git com commit inicial; `Instale/autentique` exige conferir o PATH do processo MCP; falhas antes de gerar estado aparecem no log do MCP. Reinicie a sessão do aplicativo após mudar PATH ou `.mcp.json`.

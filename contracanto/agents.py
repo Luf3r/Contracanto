@@ -25,13 +25,61 @@ REPAIR_PROMPT = (
 )
 REVIEW_PROMPT = (
     'Você é revisor de código. Verifique a task e o diff contra critérios de aceitação. '
-    'Responda EXATAMENTE com uma palavra na primeira linha: APPROVED ou REJECTED. '
-    'Nas linhas seguintes explique problemas encontrados. '
-    'Testes não executados NÃO equivalem a testes aprovados. '
-    'Não modifique arquivos.\n'
+    'Testes não executados NÃO equivalem a testes aprovados. Não modifique arquivos. '
+    'Responda SOMENTE com um objeto JSON, sem texto antes ou depois, no formato '
+    '{"verdict": "APPROVED" ou "REJECTED", "summary": "uma frase", '
+    '"problems": ["cada problema que impede a aprovação"]}.\n'
 )
+VERDICTS = ('APPROVED', 'REJECTED')
 # Latin-1 is a reversible mapping even for a patch with mixed encodings.
 PATCH_ENCODINGS = ('utf-8', 'cp1252', 'latin-1')
+
+
+@dataclass(frozen=True)
+class Verdict:
+    approved: bool
+    text: str
+
+
+def _verdict_object(response: str) -> dict | None:
+    """Primeiro objeto JSON com `verdict` na resposta, mesmo cercado de texto ou de cercas de código."""
+    decoder = json.JSONDecoder()
+    position = response.find('{')
+    while position != -1:
+        try:
+            value, _ = decoder.raw_decode(response, position)
+        except json.JSONDecodeError:
+            value = None
+        if isinstance(value, dict) and 'verdict' in value:
+            return value
+        position = response.find('{', position + 1)
+    return None
+
+
+def parse_verdict(response: str) -> Verdict:
+    """Interpreta a resposta do revisor; na dúvida, rejeita.
+
+    O formato esperado é JSON. Uma resposta cuja primeira linha seja exatamente
+    APPROVED ou REJECTED, o formato anterior, também é aceita.
+    """
+    response = response.strip()
+    data = _verdict_object(response)
+    if data is None:
+        first_line = response.splitlines()[0].strip() if response else ''
+        if first_line in VERDICTS:
+            return Verdict(first_line == 'APPROVED', response)
+        return Verdict(False, 'REJECTED\nResposta do revisor sem veredito reconhecível:\n' + response)
+    verdict = str(data.get('verdict', '')).strip().upper()
+    if verdict not in VERDICTS:
+        return Verdict(False, f'REJECTED\nVeredito desconhecido {data.get("verdict")!r}:\n' + response)
+    lines = [verdict]
+    if summary := str(data.get('summary') or '').strip():
+        lines.append(summary)
+    problems = data.get('problems') or []
+    if isinstance(problems, str):
+        problems = [problems]
+    lines.extend(f'- {problem}' for problem in problems if str(problem).strip())
+    return Verdict(verdict == 'APPROVED', '\n'.join(lines))
 
 
 @dataclass
@@ -204,8 +252,8 @@ def review(
         input_data=prompt,
         stop=stop,
     )
-    verdict = parse_claude_output(response.stdout).strip()
-    approved = verdict.splitlines()[0:1] == ['APPROVED'] and test.returncode == 0
+    verdict = parse_verdict(parse_claude_output(response.stdout))
+    feedback = verdict.text
     if test.returncode:
-        verdict += f'\nTestes do worktree falharam (código {test.returncode}):\n{test_output}'
-    return approved, verdict, test_output
+        feedback += f'\nTestes do worktree falharam (código {test.returncode}):\n{test_output}'
+    return verdict.approved and test.returncode == 0, feedback, test_output

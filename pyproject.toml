@@ -1,3 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "contracanto"
+version = "0.2.0"
+description = "Orquestração local: Claude planeja e revisa, Antigravity implementa em worktrees Git."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "mcp==1.30.0",
+    "pywin32==312; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["ruff==0.17.5", "mypy==2.4.1"]
+
+[project.scripts]
+contracanto = "contracanto.cli:run"
+contracanto-mcp = "contracanto.server:main"
+
+[tool.setuptools]
+packages = ["contracanto"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py313"
@@ -28,5 +53,5 @@ warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
 # pywin32 não distribui tipos e só é instalado no Windows.
-module = ["win32api", "win32con", "win32job", "win32process"]
+module = ["pywintypes", "win32api", "win32con", "win32job", "win32process"]
 ignore_missing_imports = true

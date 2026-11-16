@@ -135,3 +135,7 @@ class RepositoryTestCase(unittest.TestCase):
                     for wt in (store / 'runs').glob('*/wt-*'):
                         # Preserve no test worktree registrations; dirty fixtures are disposable.
                         git('worktree', 'remove', '--force', str(wt))
+
+
+def task(tid, files=None, deps=()):
+    return dict(id=tid, description='Example', deps=list(deps), files=files or [tid + '.txt'], acceptance=['Pass'])
