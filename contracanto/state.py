@@ -5,12 +5,13 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,8 @@ TERMINAL_STATES: tuple[RunStatus, ...] = ('completed', 'failed', 'cancelled')
 UNFINISHED_STATUSES: tuple[TaskStatus, ...] = ('pending', 'running', 'review')
 FINISHED_STATUSES: tuple[TaskStatus, ...] = ('approved', 'failed', 'blocked', 'cancelled')
 RUN_ID = re.compile('[0-9a-f]{64}')
+
+log = logging.getLogger('contracanto')
 
 
 def now() -> str:
@@ -71,6 +74,10 @@ class Workspace:
 
     def stop_file(self, run_id: str) -> Path:
         return self.run_dir(run_id) / 'stop'
+
+    def commands(self, run_id: str) -> Path:
+        """Um arquivo por comando demorado em andamento, com o PID do processo raiz no nome."""
+        return self.run_dir(run_id) / 'commands'
 
     def claim(self, run_id: str) -> Path:
         """Diretório criado uma única vez pelo worker que assume a execução."""
@@ -131,10 +138,16 @@ def default_workspace(repo: str | Path | None = None) -> Workspace:
 
 
 class StopSignal:
-    """Pedido cooperativo de encerramento, sinalizado por um arquivo."""
+    """Pedido cooperativo de encerramento, sinalizado por um arquivo.
 
-    def __init__(self, path: Path):
+    Acompanha os comandos interrompíveis; `commands` é o diretório onde eles são
+    registrados enquanto rodam, para que `--unlock` encontre os que sobreviveram
+    a um worker encerrado à força.
+    """
+
+    def __init__(self, path: Path, commands: Path | None = None):
         self.path = path
+        self.commands = commands
 
     def check(self) -> None:
         if self.path.is_file():
@@ -142,7 +155,7 @@ class StopSignal:
 
 
 def retry_permission_error(operation: Callable[..., Any], *args: Any) -> Any:
-    # A Windows reader may briefly prevent replacing or removing an open file.
+    # No Windows, um leitor pode impedir por instantes a troca ou a remoção de um arquivo aberto.
     for attempt in range(21):
         try:
             return operation(*args)
@@ -158,7 +171,7 @@ def write_json(path: Path, obj: Mapping[str, Any]) -> None:
         tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding='utf-8')
         retry_permission_error(tmp.replace, path)
     except (Exception, KeyboardInterrupt) as error:
-        # Recovery is required even if its first durable record cannot be saved.
+        # A recuperação continua exigida mesmo que seu primeiro registro durável não possa ser gravado.
         if obj.get('recovery_required'):
             raise RecoveryRequired(f'Falha ao persistir recuperação pendente: {error}') from error
         raise
@@ -212,6 +225,8 @@ class RunState:
     def mark(self, task_id: str, status: TaskStatus) -> None:
         """Muda o estado de uma tarefa e registra quando ela começou e terminou."""
         with self._lock:
+            if self.statuses.get(task_id) != status:
+                log.info('%s: %s', task_id, status)
             self.statuses[task_id] = status
             timing = self.timings.setdefault(task_id, {'phases': {}})
             if status not in ('pending', *FINISHED_STATUSES):
@@ -231,10 +246,12 @@ class RunState:
     def phase(self, task_id: str, name: Phase) -> Iterator[None]:
         """Acumula o tempo gasto em uma fase da tarefa, mesmo quando ela falha."""
         started = time.monotonic()
+        log.info('%s: início de %s', task_id, name)
         try:
             yield
         finally:
             elapsed = time.monotonic() - started
+            log.info('%s: fim de %s após %.1fs', task_id, name, elapsed)
             with self._lock:
                 phases = self.timings.setdefault(task_id, {'phases': {}})['phases']
                 entry = phases.setdefault(name, {'seconds': 0.0, 'count': 0})
@@ -256,6 +273,7 @@ class RunState:
     def require_recovery(self) -> None:
         """Nenhuma outra tarefa pode prosseguir até a inspeção manual."""
         with self._lock:
+            log.info('Recuperação manual exigida; a reserva será mantida')
             self.recovery_required = True
             self.close_unfinished()
             self.save()
@@ -271,10 +289,15 @@ class RunContext:
     stop: StopSignal
     # Mantém worktree e branch das tarefas aprovadas em vez de removê-los após a integração.
     keep_worktrees: bool = False
+    # Comando que prepara cada worktree (dependências, por exemplo) antes da implementação.
+    setup: Sequence[str] | None = None
 
     @classmethod
-    def open(cls, ws: Workspace, run_id: str, keep_worktrees: bool = False) -> RunContext:
-        return cls(ws, run_id, RunState(ws.status(run_id), run_id), StopSignal(ws.stop_file(run_id)), keep_worktrees)
+    def open(
+        cls, ws: Workspace, run_id: str, keep_worktrees: bool = False, setup: Sequence[str] | None = None
+    ) -> RunContext:
+        stop = StopSignal(ws.stop_file(run_id), ws.commands(run_id))
+        return cls(ws, run_id, RunState(ws.status(run_id), run_id), stop, keep_worktrees, setup)
 
     @property
     def root(self) -> Path:
@@ -286,7 +309,7 @@ class RunContext:
 
 
 def reservation_id(token: str) -> str:
-    """Only this public identifier is persisted or returned by status queries."""
+    """Identificador público da execução; só ele é gravado ou devolvido nas consultas."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -341,7 +364,7 @@ def request_stop(ws: Workspace, run_id: str | None = None) -> str:
         if current.get('recovery_required'):
             return 'Execução finalizada com recuperação manual pendente.'
         return 'Execução já finalizada.'
-    # The request may precede the worker's claim or race a new run.
+    # O pedido pode chegar antes de o worker assumir a execução ou disputar com uma nova.
     ws.run_dir(active_id).mkdir(parents=True, exist_ok=True)
     ws.stop_file(active_id).touch()
     return f'Encerramento solicitado para {active_id}. Consulte get_run_status para confirmar o término.'

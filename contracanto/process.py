@@ -48,7 +48,7 @@ if sys.platform == 'win32':
 
         def abort(self, process: subprocess.Popen) -> None:
             self._job.terminate()
-            # Assignment may have failed while the root was suspended.
+            # A associação ao job pode ter falhado com a raiz ainda suspensa.
             if process.poll() is None:
                 process.kill()
             process.communicate(timeout=config.PROCESS_EXIT_TIMEOUT)
@@ -56,6 +56,13 @@ if sys.platform == 'win32':
     def detached_options() -> dict[str, Any]:
         """Opções de Popen para um worker que sobrevive ao processo que o lançou."""
         return {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+
+    def command_alive(pid: int) -> bool:
+        """Se o comando cuja raiz tinha este PID ainda pode estar rodando.
+
+        O Job Object encerra os descendentes quando o worker termina; basta a raiz.
+        """
+        return pid_alive(pid)
 
     def pid_alive(pid: int) -> bool:
         """Se existe processo com este PID. Na dúvida, responde que sim."""
@@ -78,7 +85,7 @@ if sys.platform == 'win32':
 else:
 
     def kill_posix_group(pid: int) -> None:
-        # communicate() may already have reaped the leader.
+        # communicate() pode já ter recolhido o líder do grupo.
         with contextlib.suppress(ProcessLookupError):
             os.killpg(pid, signal.SIGKILL)
 
@@ -121,6 +128,19 @@ else:
         """Opções de Popen para um worker que sobrevive ao processo que o lançou."""
         return {'start_new_session': True}
 
+    def command_alive(pid: int) -> bool:
+        """Se o comando cuja raiz tinha este PID ainda pode estar rodando.
+
+        O grupo de processos sobrevive a um worker encerrado à força.
+        """
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
     def pid_alive(pid: int) -> bool:
         """Se existe processo com este PID. Na dúvida, responde que sim."""
         try:
@@ -130,6 +150,19 @@ else:
         except PermissionError:
             return True
         return True
+
+
+def _register(stop: StopSignal | None, pid: int) -> Path | None:
+    """Registra um comando interrompível em andamento; é diagnóstico, nunca impede o comando."""
+    if stop is None or stop.commands is None:
+        return None
+    marker = stop.commands / str(pid)
+    try:
+        stop.commands.mkdir(exist_ok=True)
+        marker.touch()
+    except OSError:
+        return None
+    return marker
 
 
 def _communicate(process: subprocess.Popen, input_data, timeout: float, stop: StopSignal | None, args):
@@ -166,15 +199,16 @@ def run(
     if env_overrides:
         env.update(env_overrides)
     raw = output != 'text'
-    # Close the containment before Popen's pipe cleanup: surviving children may
-    # still hold those pipes open if explicit termination failed.
+    # A contenção fecha antes da limpeza dos pipes do Popen: filhos sobreviventes
+    # ainda podem segurar esses pipes se o encerramento explícito falhou.
     with contextlib.ExitStack() as resources, _Containment() as containment:
         process = None
+        marker: Path | None = None
         stdin: Any = subprocess.PIPE
         if stop is not None:
             stop.check()
-            # Older Windows Pythons write pipe input synchronously in communicate.
-            # A file also allows retries while the child has not consumed its input.
+            # Pythons antigos no Windows escrevem a entrada do pipe de forma síncrona em
+            # communicate. Um arquivo também permite repetir a espera enquanto o filho não a consumiu.
             stdin = subprocess.DEVNULL
             if input_data is not None:
                 stdin = resources.enter_context(tempfile.TemporaryFile(mode='w+', encoding='utf-8'))
@@ -194,6 +228,7 @@ def run(
                 **containment.popen_options(),
             )
             resources.enter_context(process)
+            marker = _register(stop, process.pid)
             containment.start(process)
             stdout, stderr = _communicate(process, input_data, timeout, stop, args)
             containment.terminate()
@@ -211,7 +246,12 @@ def run(
                     raise RecoveryRequired(
                         f'Encerramento dos subprocessos não confirmado: {describe(cleanup_error)}'
                     ) from cleanup_error
+            # O encerramento foi confirmado; sem isso o registro fica para o --unlock.
+            if marker is not None:
+                marker.unlink(missing_ok=True)
             raise
+        if marker is not None:
+            marker.unlink(missing_ok=True)
         if output == 'nul':
             stdout = stdout.decode('utf-8')
         if raw:

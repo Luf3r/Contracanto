@@ -135,9 +135,7 @@ class OperationalTests(unittest.TestCase):
 
         current = task(['a'])
         with patch.object(proc, 'run', side_effect=command), patch.object(gitops, 'git', side_effect=git):
-            self.assertTrue(
-                agents.review(current, agents.Artifact(task=current, worktree='.', report='done'), ['test'])[0]
-            )
+            self.assertTrue(agents.review(agents.Artifact(task=current, worktree='.', report='done'), ['test'])[0])
 
     def test_preflight_failure_persists_terminal_state(self):
         with support.temp_dir() as directory:
@@ -192,7 +190,7 @@ class OperationalTests(unittest.TestCase):
                     patch.object(gitops, 'git', side_effect=git),
                     patch.object(runner.shutil, 'which', return_value='tool'),
                     patch.object(agents, 'run_executor', return_value=artifact),
-                    patch.object(agents, 'review', return_value=(True, 'APPROVED', '')),
+                    patch.object(agents, 'review', return_value=(True, 'APPROVED')),
                     patch.object(proc, 'run', side_effect=RuntimeError('integration failed')),
                 ):
                     try:

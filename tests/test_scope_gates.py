@@ -151,7 +151,7 @@ class ScopeGateTests(support.RepositoryTestCase):
 
                 with (
                     patch.object(agents, 'run_agy', side_effect=agent),
-                    patch.object(agents, 'review', return_value=(False, 'REJECTED', '')),
+                    patch.object(agents, 'review', return_value=(False, 'REJECTED')),
                 ):
                     result = runner.execute(self.ws, {'tasks': [task]}, 1, int(stage == 'repair'), ['test'])
                 self.assertEqual(result, {'A': 'failed'})

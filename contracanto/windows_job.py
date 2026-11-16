@@ -1,4 +1,4 @@
-"""Contain a suspended Windows subprocess and its descendants in a Job Object."""
+"""Contém um subprocesso do Windows, criado suspenso, e seus descendentes em um Job Object."""
 
 import ctypes
 import sys
@@ -35,8 +35,8 @@ for _name in ('Thread32First', 'Thread32Next'):
 
 
 def _resume_suspended_process(pid):
-    # Popen closes CreateProcess's primary thread handle. Before any user code
-    # runs, recover that thread from a read-only Toolhelp snapshot.
+    # O Popen fecha o handle da thread primária do CreateProcess. Antes de qualquer
+    # código do usuário rodar, a thread é recuperada de um snapshot Toolhelp de leitura.
     snapshot = _kernel.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
     if snapshot == ctypes.c_void_p(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -57,8 +57,8 @@ def _resume_suspended_process(pid):
             raise OSError(f'Não foi possível identificar a thread inicial do processo {pid}')
         thread = win32api.OpenThread(win32con.THREAD_SUSPEND_RESUME, False, threads[0])
         try:
-            # Release our CREATE_SUSPENDED count once. Another owner may hold
-            # an additional suspension; the normal command timeout still applies.
+            # Libera uma vez a suspensão do CREATE_SUSPENDED. Outro dono pode manter
+            # uma suspensão adicional; o tempo limite do comando continua valendo.
             previous_count = win32process.ResumeThread(thread)
             if previous_count < 1:
                 raise OSError(f'Thread inicial do processo {pid} sem suspensão esperada: {previous_count}')
@@ -86,7 +86,7 @@ class WindowsJob:
         process = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, pid)
         try:
             win32job.AssignProcessToJobObject(self.handle, process)
-            # No child can be spawned before containment has been established.
+            # Nenhum filho pode ser criado antes de a contenção estar estabelecida.
             _resume_suspended_process(pid)
         finally:
             process.Close()
@@ -102,5 +102,5 @@ class WindowsJob:
             time.sleep(0.01)
 
     def __exit__(self, *exc):
-        # Also contain descendants if cleanup itself was interrupted.
+        # Também contém os descendentes se a própria limpeza foi interrompida.
         self.handle.Close()

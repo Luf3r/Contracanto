@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import config, gitops, process
+from .errors import RecoveryRequired, RunCancelled, describe
 from .plan import Task
 from .state import RunContext, StopSignal
+
+log = logging.getLogger('contracanto')
 
 IMPLEMENT_PROMPT = (
     'Você está implementando UMA tarefa no Git worktree atual. '
@@ -31,7 +36,7 @@ REVIEW_PROMPT = (
     '"problems": ["cada problema que impede a aprovação"]}.\n'
 )
 VERDICTS = ('APPROVED', 'REJECTED')
-# Latin-1 is a reversible mapping even for a patch with mixed encodings.
+# Latin-1 é um mapeamento reversível mesmo para um patch com codificações misturadas.
 PATCH_ENCODINGS = ('utf-8', 'cp1252', 'latin-1')
 
 
@@ -126,7 +131,7 @@ def parse_claude_output(stdout: str) -> str:
 
 
 def run_agy(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
-    # NDJSON stdin avoids Windows command-line limits, including during repairs.
+    # NDJSON pela entrada padrão evita o limite da linha de comando do Windows, inclusive nas correções.
     payload = json.dumps({'event': 'user', 'message': {'content': prompt}}, ensure_ascii=False) + '\n'
     result = process.run(
         [
@@ -158,11 +163,50 @@ def make_worktree(ctx: RunContext, task: Task, base: str) -> Path:
     return location
 
 
+def prepare_worktree(ctx: RunContext, wt: Path, base: str, branch: str) -> None:
+    """Roda o comando de preparação, que só pode criar arquivos ignorados pelo Git."""
+    if not ctx.setup:
+        return
+    result = process.run(ctx.setup, cwd=wt, timeout=config.SETUP_TIMEOUT, check=False, stop=ctx.stop)
+    if result.returncode:
+        output = (result.stdout + '\n' + result.stderr)[-config.ERROR_TAIL :]
+        raise RuntimeError(f'Preparação do worktree falhou (código {result.returncode}): {output}')
+    gitops.check_checkout(wt, base, branch)
+    changed = gitops.changed_files(wt)
+    if changed:
+        raise RuntimeError(f'Preparação do worktree alterou arquivos não ignorados, por exemplo {changed[0]}')
+
+
+def implement(ctx: RunContext, task: Task, wt: Path, base: str, branch: str, context: str) -> str:
+    """Chama o agy e repete a chamada quando ela falha sem deixar o estado incerto."""
+    prompt = _with_payload(IMPLEMENT_PROMPT, {'task': task, 'context': context})
+    for attempt in range(config.IMPLEMENT_RETRIES + 1):
+        try:
+            return run_agy(prompt, wt, ctx.stop)
+        except (RecoveryRequired, RunCancelled):
+            raise
+        except (RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            if attempt == config.IMPLEMENT_RETRIES:
+                raise
+            # O que o agente já escreveu fica para a nova tentativa, desde que a
+            # branch e o commit do worktree continuem os esperados.
+            gitops.check_checkout(wt, base, branch)
+            log.info(
+                '%s: implementação falhou (%s); nova tentativa %d de %d',
+                task['id'],
+                describe(error).splitlines()[0][:200],
+                attempt + 1,
+                config.IMPLEMENT_RETRIES,
+            )
+    raise AssertionError('o laço retorna ou propaga o erro')
+
+
 def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifact:
     ctx.stop.check()
     wt = make_worktree(ctx, task, base)
     branch = gitops.branch_ref(wt)
-    report = run_agy(_with_payload(IMPLEMENT_PROMPT, {'task': task, 'context': context}), wt, ctx.stop)
+    prepare_worktree(ctx, wt, base, branch)
+    report = implement(ctx, task, wt, base, branch, context)
     gitops.check_checkout(wt, base, branch)
     gitops.check_scope(task, wt, base)
     if not gitops.changed_files(wt):
@@ -197,10 +241,12 @@ def _decode_patch(patch: bytes) -> tuple[str, str]:
     raise AssertionError('latin-1 decodifica qualquer sequência de bytes')
 
 
-def review(
-    task: Task, artifact: Artifact, test_command: Sequence[str], stop: StopSignal | None = None
-) -> tuple[bool, str, str]:
-    """Roda os testes no worktree e pede o veredito; aprova apenas com ambos positivos."""
+def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | None = None) -> tuple[bool, str]:
+    """Roda os testes no worktree e pede o veredito; aprova apenas com ambos positivos.
+
+    Devolve a aprovação e o parecer, que inclui a saída dos testes quando eles falham.
+    """
+    task = artifact.task
     wt = Path(artifact.worktree)
     head = gitops.head(wt)
     if artifact.commit is not None and artifact.commit != head:
@@ -220,6 +266,11 @@ def review(
         output='binary',
     ).stdout
     patch, encoding = _decode_patch(patch_bytes)
+    if len(patch) > config.REVIEW_PATCH_LIMIT:
+        raise RuntimeError(
+            f'Patch de {len(patch)} caracteres excede o limite de revisão ({config.REVIEW_PATCH_LIMIT}); '
+            f'divida a tarefa ou ajuste {config.ENV_PREFIX}REVIEW_PATCH_LIMIT'
+        )
     prompt = _with_payload(
         REVIEW_PROMPT,
         {
@@ -256,4 +307,4 @@ def review(
     feedback = verdict.text
     if test.returncode:
         feedback += f'\nTestes do worktree falharam (código {test.returncode}):\n{test_output}'
-    return verdict.approved and test.returncode == 0, feedback, test_output
+    return verdict.approved and test.returncode == 0, feedback

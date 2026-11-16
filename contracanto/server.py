@@ -12,7 +12,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from . import config, maintenance, process, state
-from .plan import validate
+from .plan import parse_command, validate
 
 mcp = FastMCP('Contracanto')
 WORKSPACE = state.default_workspace()
@@ -21,7 +21,9 @@ WORKSPACE = state.default_workspace()
 PACKAGE_PARENT = Path(__file__).resolve().parent.parent
 
 
-def _parse_submission(plan_json: str, parallel: int, retries: int, test_command_json: str) -> tuple[Any, list[str]]:
+def _parse_submission(
+    plan_json: str, parallel: int, retries: int, test_command_json: str, setup_command_json: str = ''
+) -> tuple[Any, list[str], list[str] | None]:
     """Valida a entrada; ValueError descreve o problema para quem submeteu."""
     try:
         plan = json.loads(plan_json)
@@ -29,17 +31,20 @@ def _parse_submission(plan_json: str, parallel: int, retries: int, test_command_
         raise ValueError(f'plan_json não é JSON válido: {error}') from error
     validate(plan)
     config.check_limits(parallel, retries)
-    try:
-        test = json.loads(test_command_json)
-    except json.JSONDecodeError as error:
-        raise ValueError(f'test_command_json não é JSON válido: {error}') from error
-    if not isinstance(test, list) or not test or any(not isinstance(value, str) for value in test):
-        raise ValueError('test_command_json deve ser uma lista não vazia de strings')
-    return plan, test
+    test = parse_command(test_command_json, 'test_command_json')
+    setup = parse_command(setup_command_json, 'setup_command_json') if setup_command_json.strip() else None
+    return plan, test, setup
 
 
 def worker_argv(
-    ws: state.Workspace, run_id: str, token: str, parallel: int, retries: int, keep_worktrees: bool, test: list[str]
+    ws: state.Workspace,
+    run_id: str,
+    token: str,
+    parallel: int,
+    retries: int,
+    keep_worktrees: bool,
+    test: list[str],
+    setup: list[str] | None = None,
 ) -> list[str]:
     return [
         sys.executable,
@@ -49,6 +54,7 @@ def worker_argv(
         '--repo',
         str(ws.root),
         *(['--keep-worktrees'] if keep_worktrees else []),
+        *(['--setup-json', json.dumps(setup)] if setup else []),
         '--parallel',
         str(parallel),
         '--retries',
@@ -68,13 +74,22 @@ def worker_env() -> dict[str, str]:
 
 @mcp.tool()
 def submit_plan(
-    plan_json: str, parallel: int = 3, retries: int = 2, keep_worktrees: bool = False, *, test_command_json: str
+    plan_json: str,
+    parallel: int = 3,
+    retries: int = 2,
+    keep_worktrees: bool = False,
+    setup_command_json: str = '',
+    *,
+    test_command_json: str,
 ) -> str:
     """Recebe um plano criado pelo Claude e INICIA sua execução local em segundo plano.
     plan_json: objeto JSON com goal e tasks [{id,description,deps,files,acceptance}].
     test_command_json: lista JSON de argumentos do comando de teste, ex. ["python","-m","pytest"].
     keep_worktrees: preserva worktree e branch das tarefas aprovadas; por padrão são removidos
     após a integração. Os de tarefas que falharam sempre ficam para inspeção.
+    setup_command_json: opcional; lista JSON de argumentos de um comando executado em cada
+    worktree antes da implementação, ex. ["npm","ci"], para instalar o que o Git ignora.
+    Só pode criar arquivos ignorados pelo Git e é tão confiável quanto o comando de teste.
     Forneça somente projetos, planos e comandos de teste confiáveis. O comando e o código
     testado rodam com as permissões locais do worker antes da revisão e após a integração.
     Podem acessar arquivos fora do worktree, credenciais e rede, inclusive para push ou deploy.
@@ -83,7 +98,7 @@ def submit_plan(
     """
     ws = WORKSPACE
     try:
-        plan, test = _parse_submission(plan_json, parallel, retries, test_command_json)
+        plan, test, setup = _parse_submission(plan_json, parallel, retries, test_command_json, setup_command_json)
         token = state.reserve_run(ws)
     except (ValueError, RuntimeError) as error:
         return f'Erro: {error}'
@@ -93,7 +108,7 @@ def submit_plan(
         # A partir daqui as consultas mostram esta execução, não a anterior.
         ws.publish_run(run_id)
         state.write_json(ws.plan(run_id), plan)
-        argv = worker_argv(ws, run_id, token, parallel, retries, keep_worktrees, test)
+        argv = worker_argv(ws, run_id, token, parallel, retries, keep_worktrees, test, setup)
         run.save()
         with ws.log(run_id).open('w', encoding='utf-8') as log:
             proc = subprocess.Popen(
@@ -121,7 +136,7 @@ def submit_plan(
     try:
         ws.pid(run_id).write_text(str(proc.pid), encoding='utf-8')
     except OSError as error:
-        # The worker already owns the run; a diagnostic write must not undo it.
+        # O worker já é dono da execução; uma gravação de diagnóstico não pode desfazer isso.
         message += (
             f'\nAviso: não foi possível salvar pid.txt: {error}. '
             f'O arquivo pode estar ausente ou desatualizado; use o PID {proc.pid} desta resposta para inspeção.'
@@ -140,7 +155,9 @@ def get_run_status() -> str:
     """Retorna um objeto JSON com o estado da execução reservada ou, sem reserva, da mais recente.
     run: status persistido (state, run_id, started_at, finished_at, duration_seconds, statuses,
     details, timings por tarefa e fase, recovery_required, error) ou null.
-    reservation_state: "active", "none" ou "incomplete"; reservation traz run_id, pid e stop_requested.
+    reservation_state: "active", "none" ou "incomplete"; reservation traz run_id, pid, stop_requested
+    e worker_alive. Com worker_alive false a execução não vai mais avançar: pare de consultar e
+    avise o operador, que inspeciona o repositório e libera a reserva com --unlock.
     log: últimas linhas do log do worker lançado pelo MCP.
     """
     return json.dumps(maintenance.status_report(WORKSPACE), ensure_ascii=False, indent=2)

@@ -18,12 +18,12 @@ def read_reservation(ws: Workspace) -> tuple[str, dict[str, Any] | None]:
     try:
         record = json.loads(ws.lock.read_text(encoding='utf-8'))
     except FileNotFoundError:
-        # Normal completion may release the reservation while status is polled.
+        # O término normal pode liberar a reserva durante a consulta.
         return 'none', None
     except json.JSONDecodeError:
-        # Polling may observe an exclusive file before its creator finishes writing.
+        # A consulta pode ver o arquivo exclusivo antes de o criador terminar de escrevê-lo.
         return 'incomplete', None
-    # Only the public identifier leaves this process, never the worker's credential.
+    # Só o identificador público sai deste processo, nunca a credencial do worker.
     public = {key: record[key] for key in ('run_id', 'pid') if key in record}
     run_id = public.get('run_id')
     if isinstance(run_id, str) and state.RUN_ID.fullmatch(run_id):
@@ -60,6 +60,11 @@ def status_report(ws: Workspace) -> dict[str, Any]:
     """Estado da execução reservada ou, sem reserva, da mais recente."""
     reservation_state, reservation = read_reservation(ws)
     run_id = selected_run(ws, reservation)
+    if reservation is not None:
+        # Um worker encerrado à força deixa a reserva e o estado `running` para trás.
+        lock_pid = reservation.get('pid') if isinstance(reservation.get('pid'), int) else None
+        pids = _worker_pids(ws, reservation.get('run_id'), lock_pid)
+        reservation['worker_alive'] = any(process.pid_alive(pid) for pid in pids)
     run = None
     log = ''
     if run_id is not None:
@@ -89,6 +94,17 @@ def _worker_pids(ws: Workspace, run_id: str | None, lock_pid: int | None) -> lis
     return [lock_pid] if lock_pid is not None else []
 
 
+def _running_commands(ws: Workspace, run_id: str | None) -> list[int]:
+    """Comandos do worker (agy, revisor, testes) que continuam rodando sem ele."""
+    if run_id is None:
+        return []
+    try:
+        names = [path.name for path in ws.commands(run_id).iterdir()]
+    except OSError:
+        return []
+    return [int(name) for name in sorted(names) if name.isdecimal() and process.command_alive(int(name))]
+
+
 def unlock(ws: Workspace) -> str:
     """Remove uma reserva deixada por um worker que não está mais em execução.
 
@@ -104,6 +120,8 @@ def unlock(ws: Workspace) -> str:
         record = json.loads(raw)
     except json.JSONDecodeError:
         record = {}
+    if not isinstance(record, dict):
+        record = {}
     run_id = record.get('run_id')
     run_id = run_id if isinstance(run_id, str) and state.RUN_ID.fullmatch(run_id) else None
     lock_pid = record.get('pid') if isinstance(record.get('pid'), int) else None
@@ -112,6 +130,12 @@ def unlock(ws: Workspace) -> str:
         return (
             f'Recusado: o processo {alive[0]} ainda está em execução. '
             'Use --stop ou confirme no Gerenciador de Tarefas que ele não pertence a esta execução.'
+        )
+    running = _running_commands(ws, run_id)
+    if running:
+        return (
+            f'Recusado: um comando iniciado pelo worker (PID {running[0]}) ainda está em execução. '
+            'Encerre-o, com seus subprocessos, antes de liberar a reserva.'
         )
     try:
         gitops.check_git_operation(ws.root)
@@ -137,12 +161,13 @@ def unlock(ws: Workspace) -> str:
     return f'Reserva {run_id or "sem identificador"} removida. Uma nova execução pode ser iniciada.'
 
 
-def prune_runs(ws: Workspace, keep: int) -> dict[str, Any]:
+def prune_runs(ws: Workspace, keep: int, force: bool = False) -> dict[str, Any]:
     """Remove os registros das execuções encerradas além das `keep` mais recentes.
 
     Execuções reservadas, sem estado final ou com recuperação pendente são
     mantidas. Os worktrees de cada execução saem com `git worktree remove`,
-    que recusa os que têm alterações; nesse caso a execução inteira fica.
+    que recusa os que têm alterações; nesse caso a execução inteira fica, salvo
+    com `force`, que descarta essas alterações.
     """
     if keep < 0:
         raise ValueError('keep deve ser zero ou maior')
@@ -161,7 +186,7 @@ def prune_runs(ws: Workspace, keep: int) -> dict[str, Any]:
         elif current.get('recovery_required'):
             kept[run_id] = 'recuperação pendente'
         else:
-            error = _remove_run(ws, run_id)
+            error = _remove_run(ws, run_id, force)
             if error is None:
                 removed.append(run_id)
             else:
@@ -184,12 +209,12 @@ def _registered_worktrees(root: Path) -> dict[Path, str | None]:
     return worktrees
 
 
-def _remove_run(ws: Workspace, run_id: str) -> str | None:
+def _remove_run(ws: Workspace, run_id: str, force: bool) -> str | None:
     run_dir = ws.run_dir(run_id).resolve()
     try:
         for worktree, branch in _registered_worktrees(ws.root).items():
             if worktree.parent == run_dir:
-                gitops.remove_worktree(ws.root, worktree, branch)
+                gitops.remove_worktree(ws.root, worktree, branch, force)
     except RuntimeError as error:
         lines = str(error).strip().splitlines()
         return f'worktree não removido: {lines[-1] if lines else error}'

@@ -5,7 +5,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import support
 
@@ -138,7 +138,7 @@ class SubmissionTests(unittest.TestCase):
             self.assertNotIn('worker-credential', status)
             report = json.loads(status)
             self.assertEqual(report['reservation_state'], 'active')
-            self.assertEqual(report['reservation'], {'pid': 123})
+            self.assertEqual(report['reservation'], {'pid': 123, 'worker_alive': ANY})
 
     def test_only_first_mcp_worker_can_claim_or_release_reservation(self):
         with support.temp_workspace(server) as ws, patch.object(server.subprocess, 'Popen') as launch:

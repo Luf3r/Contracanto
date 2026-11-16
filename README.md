@@ -43,9 +43,9 @@ git status --porcelain
 ```
 
 O último comando deve retornar vazio. Configure `git config user.name` e `git config user.email` caso o Git solicite sua identidade.
+5. O executor e todas as correções passam explicitamente `--mode auto --sandbox` ao Antigravity, sem `--dangerously-skip-permissions`. Configure uma allowlist limitada no CLI antes de operar. Comandos negados devem ser autorizados de forma granular; não desative o sandbox para contornar a falha. O modo headless pode negar comandos não autorizados. Configure permissões granulares conforme docs: https://antigravity.google/docs/cli/headless/
 
 Como alternativa a copiar os arquivos, instale o pacote em um venv: `python -m pip install CAMINHO_DO_CONTRACANTO`. Isso cria os comandos `contracanto` (CLI) e `contracanto-mcp` (servidor MCP). Instalado, o pacote orquestra o repositório do diretório atual, salvo `--repo` ou `CONTRACANTO_REPO`. Com os arquivos copiados para o projeto, `py orchestrator.py` e `python -m contracanto` são equivalentes.
-5. O executor e todas as correções passam explicitamente `--mode auto --sandbox` ao Antigravity, sem `--dangerously-skip-permissions`. Configure uma allowlist limitada no CLI antes de operar. Comandos negados devem ser autorizados de forma granular; não desative o sandbox para contornar a falha. O modo headless pode negar comandos não autorizados. Configure permissões granulares conforme docs: https://antigravity.google/docs/cli/headless/
 
 ## Teste sem MCP
 Edite `plan.example.json` com tasks reais e arquivos autorizados. Use um repositório descartável. Exemplo:
@@ -58,6 +58,16 @@ O plano de exemplo é ilustrativo; adaptações são necessárias conforme o sta
 
 `--test` deve ser a **última opção**: todos os argumentos seguintes pertencem ao comando de testes, inclusive `-m`, `-v` e outras flags. `py orchestrator.py --help` lista todas as opções. `--repo CAMINHO` escolhe o repositório a orquestrar e `--keep-worktrees` preserva worktree e branch das tarefas aprovadas.
 
+Cada tarefa roda em um worktree novo, que só contém os arquivos rastreados pelo Git: `.venv`, `node_modules` e outros diretórios ignorados não existem ali. Se os testes dependem deles, informe um comando de preparação com `--setup-json`, uma lista JSON de argumentos, antes de `--test`:
+
+```powershell
+py orchestrator.py plan.example.json --setup-json '[\"npm\",\"ci\"]' --test npm test
+```
+
+O comando roda em cada worktree antes da implementação, com as mesmas permissões do comando de testes, e só pode criar arquivos ignorados pelo Git; se falhar ou deixar outros arquivos, a tarefa falha. O PowerShell 5.1 exige as aspas internas escapadas com `\"`, como no exemplo; no PowerShell 7 e no bash basta `'["npm","ci"]'`.
+
+Erros de uso e de preparação, como plano inexistente ou repositório com alterações, saem em uma linha iniciada por `Erro:`, com código de saída diferente de zero.
+
 ## Operação pela linha de comando
 
 | Comando | Efeito |
@@ -66,10 +76,22 @@ O plano de exemplo é ilustrativo; adaptações são necessárias conforme o sta
 | `py orchestrator.py --stop` | Pede o encerramento cooperativo da execução ativa |
 | `py orchestrator.py --unlock` | Remove a reserva de um worker que já terminou, depois de conferir o processo e o Git |
 | `py orchestrator.py --prune-runs N` | Remove os registros das execuções encerradas, mantendo as N mais recentes |
+| `py orchestrator.py --prune-runs N --force` | O mesmo, descartando também worktrees com alterações não salvas |
 
-Todos aceitam `--repo CAMINHO`. `--unlock` recusa, com código de saída 1, enquanto o worker da execução estiver vivo, houver operação Git pendente ou o repositório tiver alterações. `--prune-runs` nunca remove a execução reservada, uma sem estado final ou uma com recuperação pendente; também mantém a execução inteira quando algum worktree dela tem alterações.
+Todos aceitam `--repo CAMINHO`. `--unlock` recusa, com código de saída 1, enquanto o worker da execução ou um comando iniciado por ele estiver vivo, houver operação Git pendente ou o repositório tiver alterações. `--prune-runs` nunca remove a execução reservada, uma sem estado final ou uma com recuperação pendente. Sem `--force`, também mantém a execução inteira quando algum worktree dela tem alterações, o que é comum em tarefas que falharam; com `--force`, essas alterações e as branches `agent/*` são descartadas.
 
-Os tempos limite e o modelo do revisor são ajustáveis por variáveis de ambiente, em segundos: `CONTRACANTO_TEST_TIMEOUT` (padrão 600), `CONTRACANTO_AGENT_TIMEOUT` (1600), `CONTRACANTO_REVIEW_TIMEOUT` (900), `CONTRACANTO_GIT_TIMEOUT` (180), `CONTRACANTO_COMMAND_TIMEOUT` (1800) e `CONTRACANTO_REVIEW_MODEL` (`sonnet`). No MCP, defina-as em `"env"` na configuração do servidor; o worker herda o ambiente. Um valor inválido interrompe a inicialização com o nome da variável.
+Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `"env"` na configuração do servidor; o worker herda o ambiente. Um valor inválido interrompe a inicialização com o nome da variável.
+
+| Variável | Padrão | Efeito |
+| --- | --- | --- |
+| `CONTRACANTO_TEST_TIMEOUT` | 600 | Segundos para cada execução do comando de testes |
+| `CONTRACANTO_SETUP_TIMEOUT` | 600 | Segundos para o comando de preparação de cada worktree |
+| `CONTRACANTO_AGENT_TIMEOUT` | 1600 | Segundos para cada chamada ao `agy`; mínimo 160 |
+| `CONTRACANTO_REVIEW_TIMEOUT` | 900 | Segundos para cada chamada ao revisor |
+| `CONTRACANTO_GIT_TIMEOUT` | 180 | Segundos para cada comando Git |
+| `CONTRACANTO_REVIEW_MODEL` | `sonnet` | Modelo usado pelo revisor |
+| `CONTRACANTO_IMPLEMENT_RETRIES` | 1 | Novas chamadas ao `agy` quando a implementação falha (0 a 3) |
+| `CONTRACANTO_REVIEW_PATCH_LIMIT` | 400000 | Tamanho máximo do patch enviado ao revisor, em caracteres |
 
 ## Testes deste projeto
 
@@ -116,9 +138,11 @@ O MCP exige `plan_json` e `test_command_json`. Ambos são strings contendo JSON.
 }
 ```
 
+`setup_command_json` é opcional e tem o mesmo formato de `test_command_json`: é o comando de preparação de cada worktree, equivalente a `--setup-json`.
+
 Quem fornece `--test` ou `test_command_json` escolhe um comando local. O worker recebe uma lista não vazia de argumentos e inicia o executável diretamente. O comando e o código que ele carrega rodam fora do sandbox do Antigravity, com as permissões do usuário, inclusive acesso à rede, às credenciais e a arquivos fora do repositório. Podem fazer push ou deploy. Use apenas comandos, planos e código de origem confiável. A primeira execução ocorre no worktree antes do parecer do revisor. Cada nova revisão repete o teste, e a integração o executa novamente na branch de destino.
 
-`parallel` aceita 1 a 8. `retries` aceita 0 a 3 e controla as tentativas de correção após rejeição da revisão.
+`parallel` aceita 1 a 8. `retries` aceita 0 a 3 e controla as tentativas de correção após rejeição da revisão. Uma falha da própria implementação, como um timeout ou um erro do `agy`, é outra coisa: a chamada é repetida no mesmo worktree até `CONTRACANTO_IMPLEMENT_RETRIES` vezes, desde que a branch e o commit do worktree estejam intactos e o encerramento dos processos tenha sido confirmado.
 
 Se os testes do worktree falharem, o executor recebe o parecer do revisor, o código de saída e o trecho final da saída dos testes na tentativa de correção. Se as tentativas se esgotarem, consulte o diagnóstico em `details.<id>.review` e o resumo em `details.<id>.error` no status da tarefa.
 
@@ -158,13 +182,13 @@ Peça ao Claude na aba Code:
 
 ## Comportamento e limitações
 - O Claude cria o grafo de tarefas e envia pelo MCP. A fila é executada por Python, chamando `agy` em worktrees locais isolados.
-- O Claude Code CLI revisa o patch usando o alias `sonnet` (ou `CONTRACANTO_REVIEW_MODEL`), sem ferramentas internas e sem carregar servidores MCP. O revisor responde com um objeto JSON (`verdict`, `summary`, `problems`); o orquestrador aceita esse objeto mesmo cercado de texto ou de uma cerca de código, e também a resposta no formato anterior, com `APPROVED` ou `REJECTED` na primeira linha. Qualquer outra resposta conta como rejeição, e a aprovação exige também que os testes do worktree passem. O revisor recebe os diffs de texto e os patches binários no formato aplicável do Git. Para um critério que depende do conteúdo de uma imagem ou de outro binário, inclua um teste específico desse conteúdo. Prompts seguem por stdin para evitar o limite de argumentos do Windows. A aprovação exige o veredito `APPROVED` na primeira linha e testes aprovados.
-- Tarefas independentes, que não anunciam ownership conflitante, podem rodar em paralelo. Implementação, revisão e correções de um lote rodam em paralelo, cada tarefa no próprio worktree; a integração na branch de destino é sequencial, na ordem em que as implementações terminaram. Se uma revisão exigir recuperação manual, nenhuma tarefa do lote é integrada.
+- O Claude Code CLI revisa o patch usando o alias `sonnet` (ou `CONTRACANTO_REVIEW_MODEL`), sem ferramentas internas e sem carregar servidores MCP. O revisor responde com um objeto JSON (`verdict`, `summary`, `problems`); o orquestrador aceita esse objeto mesmo cercado de texto ou de uma cerca de código, e também a resposta no formato anterior, com `APPROVED` ou `REJECTED` na primeira linha. Qualquer outra resposta conta como rejeição, e a aprovação exige também que os testes do worktree passem. O revisor recebe os diffs de texto e os patches binários no formato aplicável do Git. Para um critério que depende do conteúdo de uma imagem ou de outro binário, inclua um teste específico desse conteúdo. Prompts seguem por stdin para evitar o limite de argumentos do Windows. Um patch maior que `CONTRACANTO_REVIEW_PATCH_LIMIT` faz a tarefa falhar com essa indicação, em vez de ser revisado pela metade; divida a tarefa.
+- Tarefas independentes, que não anunciam ownership conflitante, podem rodar em paralelo. Implementação, revisão e correções de um lote rodam em paralelo, cada tarefa no próprio worktree; a integração na branch de destino é sequencial, na ordem em que as implementações terminaram. Se uma revisão exigir recuperação manual, nenhuma tarefa do lote é integrada. Quando uma tarefa conflita com outra já integrada no mesmo lote, ela falha e `details.<id>.error` lista os arquivos em conflito.
 - No pedido ao revisor, `patch_encoding` identifica a codificação usada para representar os bytes do patch. Codificar o campo `patch` com esse valor reproduz a saída original do Git, inclusive quebras de linha e acentos de arquivos legados.
 - Após cada implementação ou correção, o orquestrador confere a branch atribuída ao worktree e o commit esperado antes de registrar as mudanças. Uma troca de branch no mesmo commit também faz a tarefa falhar. O escopo é conferido pelo diff completo entre a base e o candidato antes de cada revisão, incluindo origem e destino de renomeações.
 - A integração termina na branch local. Depois de integrada e aprovada, a tarefa tem seu worktree e sua branch `agent/*` removidos; `details.<id>.worktree_removed` registra a limpeza e `cleanup_error` uma eventual falha, que não altera o resultado. Use `--keep-worktrees` (ou `keep_worktrees` em `submit_plan`) para preservá-los. Tarefas que falham, inclusive por conflito de cherry-pick, sempre mantêm worktree e branch para inspeção.
 - Antes do cherry-pick, o worker compara os caminhos da integração prevista com a lista `files` da tarefa. Se uma tarefa anterior moveu um diretório e o Git redirecionaria uma adição para fora do escopo, a integração é recusada. Depois do cherry-pick, o worker confere os caminhos do commit aplicado antes de executar os testes.
-- `get_run_status` precisa ser consultado; o aplicativo Claude não recebe notificação push de término.
+- `get_run_status` precisa ser consultado; o aplicativo Claude não recebe notificação push de término. `reservation.worker_alive` indica se o worker ainda está rodando: com `false`, o estado não vai mais mudar e a reserva precisa ser liberada pelo operador.
 - Não há retomada após desligar o processo, limitação de custos/tokens, isolamento forte de execução ou fila transacional. Não use em repositórios reais até adicionar esses recursos.
 - Scripts usam revisão por modelo e não garantem correção ou segurança. Execute testes e auditoria adicionais antes de merge de produção.
 - Manter `agy` e `claude` no PATH do processo MCP e ter autenticação ativa é obrigatório.
@@ -172,6 +196,7 @@ Peça ao Claude na aba Code:
 ## Estado e recuperação
 
 - Cada execução registra `status.json`, `plan.json` e, quando iniciada pelo MCP, `run.log` e `pid.txt` em `.agent-runs/runs/<run_id>/`. `get_run_status()` e `--status` devolvem esse estado como JSON, com horários de início e fim e o tempo gasto por tarefa em cada fase.
+- O worker registra cada evento da execução, com a hora: lotes, mudanças de estado das tarefas, início e fim de cada fase, vereditos, commits aplicados e erros. Pela CLI os eventos saem na saída de erro; pelo MCP ficam em `run.log`, cujo final aparece em `get_run_status()`.
 - Para encerrar a execução ativa, chame `stop_run()` ou execute `py orchestrator.py --stop`.
 - CLI e MCP compartilham a reserva `.agent-runs/run.lock`. Quando o estado do Git ou dos subprocessos fica incerto, `recovery_required: true` mantém a reserva até a inspeção manual; depois dela, `--unlock` libera a reserva.
 
@@ -200,6 +225,6 @@ Nenhum módulo guarda estado global: o repositório e o diretório de execuçõe
 
 ## Dependências e validação de alterações
 
-`requirements.txt` fixa as dependências diretas; `requirements.lock.txt` fixa também as transitivas do ambiente validado, com `pywin32` restrito ao Windows. Use o lock na instalação e na CI. `requirements-dev.txt` traz o `ruff` e o `mypy`; a CI executa `ruff check .`, `ruff format --check .` e `mypy` além dos testes, pelo executor paralelo. `pyproject.toml` também declara o pacote e seus comandos para `pip install`. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
+`pyproject.toml` é a única declaração das dependências diretas (`mcp` e, no Windows, `pywin32`) e das ferramentas de desenvolvimento (`ruff` e `mypy`, no extra `dev`), além do pacote e de seus comandos. `requirements.lock.txt` fixa também as transitivas do ambiente validado; use-o na instalação e na CI. Para desenvolver, instale o lock e depois `python -m pip install -e ".[dev]"`. A CI executa `ruff check .`, `ruff format --check .` e `mypy` além dos testes, pelo executor paralelo. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
 
 A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Retomada automática após crash e orçamento de tokens/custo continuam fora do escopo deste protótipo; a reserva e a recuperação manual continuam obrigatórias nesses casos.

@@ -20,13 +20,6 @@ from contracanto import state as st
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def finished_process_pid():
-    """PID de um processo que já terminou."""
-    child = subprocess.Popen([sys.executable, '-c', 'pass'])
-    child.wait()
-    return child.pid
-
-
 class TimingTests(support.RepositoryTestCase):
     def test_status_records_run_and_phase_times(self):
         with self.repository() as (root, store, base, task, git):
@@ -44,7 +37,7 @@ class TimingTests(support.RepositoryTestCase):
 
     def test_repairs_accumulate_review_and_repair_time(self):
         with self.repository() as (root, store, base, task, git):
-            verdicts = iter([(False, 'REJECTED\n- falta algo', ''), (True, 'APPROVED', '')])
+            verdicts = iter([(False, 'REJECTED\n- falta algo'), (True, 'APPROVED')])
             with patch.object(agents, 'review', side_effect=lambda *args: next(verdicts)):
                 states = runner.execute(self.ws, {'tasks': [task]}, 1, 1, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'approved'})
@@ -77,10 +70,10 @@ class ParallelReviewTests(support.RepositoryTestCase):
                 (wt / data['task']['files'][0]).write_text(data['task']['id'])
                 return 'done'
 
-            def review(task, *args):
+            def review(*args):
                 # Uma revisão serial nunca teria duas chamadas simultâneas aqui.
                 both_reviewing.wait()
-                return original_review(task, *args)
+                return original_review(*args)
 
             def record(ctx, artifact, *args):
                 integrated.append(artifact.task['id'])
@@ -107,10 +100,10 @@ class ParallelReviewTests(support.RepositoryTestCase):
                 (wt / data['task']['files'][0]).write_text('x')
                 return 'done'
 
-            def review(task, *args):
-                if task['id'] == 'A':
+            def review(artifact, *args):
+                if artifact.task['id'] == 'A':
                     raise support.errors.RecoveryRequired('test process still alive')
-                return True, 'APPROVED', ''
+                return True, 'APPROVED'
 
             with patch.object(agents, 'run_agy', side_effect=agent), patch.object(agents, 'review', side_effect=review):
                 states = runner.execute(self.ws, {'tasks': tasks}, 2, 0, [sys.executable, '-c', 'pass'])
@@ -164,7 +157,7 @@ class VerdictTests(unittest.TestCase):
             patch.object(support.gitops, 'run_tests', return_value=failing),
             patch.object(support.gitops, 'head', return_value='commit'),
         ):
-            approved, feedback, _ = agents.review(artifact.task, artifact, ['test'])
+            approved, feedback = agents.review(artifact, ['test'])
         self.assertFalse(approved)
         self.assertIn('código 3', feedback)
 
@@ -201,7 +194,7 @@ class ConfigTests(unittest.TestCase):
 class ProcessTests(unittest.TestCase):
     def test_pid_alive(self):
         self.assertTrue(proc.pid_alive(os.getpid()))
-        self.assertFalse(proc.pid_alive(finished_process_pid()))
+        self.assertFalse(proc.pid_alive(support.finished_process_pid()))
 
 
 class UnlockTests(unittest.TestCase):
@@ -229,7 +222,7 @@ class UnlockTests(unittest.TestCase):
         self.assertTrue(ws.lock.exists())
 
     def test_refuses_with_dirty_repository_or_pending_operation(self):
-        ws, run_id, git = self.reserved_repository(finished_process_pid())
+        ws, run_id, git = self.reserved_repository(support.finished_process_pid())
         (ws.root / 'dirty.txt').write_text('x')
         self.assertIn('alterado', maintenance.unlock(ws))
         (ws.root / 'dirty.txt').unlink()
@@ -238,7 +231,7 @@ class UnlockTests(unittest.TestCase):
         self.assertTrue(ws.lock.exists())
 
     def test_releases_dead_worker_and_records_it(self):
-        ws, run_id, git = self.reserved_repository(finished_process_pid())
+        ws, run_id, git = self.reserved_repository(support.finished_process_pid())
         message = maintenance.unlock(ws)
         self.assertIn('removida', message)
         self.assertFalse(ws.lock.exists())

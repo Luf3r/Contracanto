@@ -137,5 +137,20 @@ class RepositoryTestCase(unittest.TestCase):
                         git('worktree', 'remove', '--force', str(wt))
 
 
+_FINISHED = []
+
+
+def finished_process_pid():
+    """PID de um processo que já terminou.
+
+    O objeto do processo fica guardado: no Windows o PID só é reaproveitado depois
+    que o último handle é fechado, e a suíte paralela cria processos o tempo todo.
+    """
+    child = subprocess.Popen([sys.executable, '-c', 'pass'])
+    child.wait()
+    _FINISHED.append(child)
+    return child.pid
+
+
 def task(tid, files=None, deps=()):
     return dict(id=tid, description='Example', deps=list(deps), files=files or [tid + '.txt'], acceptance=['Pass'])

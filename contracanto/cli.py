@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from . import config, maintenance, runner, state
-from .errors import RunCancelled
+from .errors import RunCancelled, describe
+from .plan import parse_command
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='contracanto',
         description='Orquestra a implementação de um plano pelo Antigravity e a revisão pelo Claude.',
-        epilog='Tempos e modelo do revisor: variáveis ' + ', '.join(config.ENV_PREFIX + n for n in config.TUNABLE),
+        epilog='Ajustes por variável de ambiente: ' + ', '.join(config.ENV_PREFIX + n for n in config.TUNABLE),
     )
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('plan', type=Path, nargs='?', help='Arquivo JSON do plano a executar')
@@ -33,6 +35,11 @@ def _parser() -> argparse.ArgumentParser:
         metavar='N',
         help='Remove os registros das execuções encerradas, mantendo as N mais recentes',
     )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Com --prune-runs: descarta também worktrees com alterações não salvas.',
+    )
     parser.add_argument('--parallel', type=int, default=config.DEFAULT_PARALLEL)
     parser.add_argument('--retries', type=int, default=config.DEFAULT_RETRIES)
     parser.add_argument('--reservation', help=argparse.SUPPRESS)
@@ -45,6 +52,12 @@ def _parser() -> argparse.ArgumentParser:
         '--keep-worktrees',
         action='store_true',
         help='Preserva worktree e branch das tarefas aprovadas em vez de removê-los após a integração.',
+    )
+    parser.add_argument(
+        '--setup-json',
+        metavar='LISTA_JSON',
+        help='Comando confiável, como lista JSON de argumentos, executado em cada worktree antes da implementação '
+        '(por exemplo \'["npm","ci"]\'). Só pode criar arquivos ignorados pelo Git.',
     )
     parser.add_argument(
         '--test',
@@ -62,6 +75,8 @@ def main(argv: Sequence[str] | None = None, ws: state.Workspace | None = None) -
         ws = ws or state.default_workspace(args.repo)
     except ValueError as error:
         parser.error(str(error))
+    if args.force and args.prune_runs is None:
+        parser.error('--force só vale com --prune-runs')
     if args.stop:
         print(state.request_stop(ws))
         return
@@ -76,17 +91,20 @@ def main(argv: Sequence[str] | None = None, ws: state.Workspace | None = None) -
         return
     if args.prune_runs is not None:
         try:
-            result = maintenance.prune_runs(ws, args.prune_runs)
+            result = maintenance.prune_runs(ws, args.prune_runs, args.force)
         except ValueError as error:
             parser.error(str(error))
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     try:
         config.check_limits(args.parallel, args.retries)
+        setup = parse_command(args.setup_json, '--setup-json') if args.setup_json else None
+        # Um worker lançado pelo MCP só lê o plano depois de assumir a reserva.
+        plan = args.plan if args.reservation else json.loads(args.plan.read_text(encoding='utf-8'))
+    except OSError as error:
+        parser.error(f'Não foi possível ler o plano: {error}')
     except ValueError as error:
         parser.error(str(error))
-    # Um worker lançado pelo MCP só lê o plano depois de assumir a reserva.
-    plan = args.plan if args.reservation else json.loads(args.plan.read_text(encoding='utf-8'))
     result = runner.execute(
         ws,
         plan,
@@ -95,6 +113,7 @@ def main(argv: Sequence[str] | None = None, ws: state.Workspace | None = None) -
         args.test,
         reservation=args.reservation,
         keep_worktrees=args.keep_worktrees,
+        setup=setup,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if any(status != 'approved' for status in result.values()):
@@ -102,7 +121,14 @@ def main(argv: Sequence[str] | None = None, ws: state.Workspace | None = None) -
 
 
 def run() -> None:
+    # Eventos da execução vão para a saída de erro: o terminal na CLI, run.log no MCP.
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='%(asctime)s %(message)s', datefmt='%H:%M:%S')
     try:
         main()
     except RunCancelled as error:
         sys.exit(str(error))
+    except (RuntimeError, ValueError, OSError) as error:
+        if '--reservation' in sys.argv:
+            # No worker do MCP a pilha completa vai para run.log.
+            raise
+        sys.exit(f'Erro: {describe(error)}')

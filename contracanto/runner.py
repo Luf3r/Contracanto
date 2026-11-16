@@ -9,6 +9,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import json
+import logging
 import os
 import shutil
 from collections.abc import Callable, Mapping, Sequence
@@ -21,6 +22,13 @@ from .gitops import TargetCheckout
 from .plan import Plan, Task, overlaps, validate
 from .state import RunContext, TaskStatus, Workspace
 
+log = logging.getLogger('contracanto')
+
+
+def _summary(error: BaseException) -> str:
+    """Primeira linha do erro, para o log de eventos."""
+    return describe(error).splitlines()[0][:300]
+
 
 def execute(
     ws: Workspace,
@@ -30,6 +38,7 @@ def execute(
     tests: Sequence[str] | None,
     reservation: str | None = None,
     keep_worktrees: bool = False,
+    setup: Sequence[str] | None = None,
 ) -> dict[str, TaskStatus]:
     """Assume a reserva, executa o plano e grava o estado final.
 
@@ -39,7 +48,7 @@ def execute(
     run_id = state.reservation_id(token)
     if not state.owns_reservation(ws, run_id):
         raise RuntimeError('Reserva de execução inválida')
-    # The claim mkdir is the single-use handoff. A losing worker must never enter cleanup.
+    # O mkdir do claim é a passagem de uso único. O worker que perde nunca entra na limpeza.
     try:
         ws.run_dir(run_id).mkdir(parents=True, exist_ok=True)
         ws.claim(run_id).mkdir()
@@ -52,7 +61,7 @@ def execute(
     # Diagnóstico para --unlock; a execução não depende dele.
     with contextlib.suppress(OSError):
         ws.worker_pid(run_id).write_text(str(os.getpid()), encoding='utf-8')
-    ctx = RunContext.open(ws, run_id, keep_worktrees)
+    ctx = RunContext.open(ws, run_id, keep_worktrees, setup)
     run = ctx.state
     keep_lock = False
     try:
@@ -60,22 +69,24 @@ def execute(
         ws.publish_run(run_id)
         run.save()
         loaded: Plan = json.loads(plan.read_text(encoding='utf-8')) if isinstance(plan, Path) else plan
-        # Publish the current CLI or MCP plan only after proving lock ownership.
+        # O plano da CLI ou do MCP só é publicado depois de provada a posse da reserva.
         state.write_json(ws.plan(run_id), loaded)
         ctx.stop.check()
         result = _execute(ctx, loaded, max_workers, retries, tests)
         keep_lock = run.recovery_required
         run.finish('completed' if all(status == 'approved' for status in result.values()) else 'failed')
         run.save()
+        log.info('Execução encerrada: %s', run.state)
         return result
     except (Exception, KeyboardInterrupt) as error:
-        # A later persistence error must never clear an earlier recovery flag.
+        # Um erro posterior de gravação nunca pode apagar uma recuperação já exigida.
         keep_lock = keep_lock or run.recovery_required or isinstance(error, RecoveryRequired)
         cancelled = isinstance(error, RunCancelled) and not keep_lock
         run.finish('cancelled' if cancelled else 'failed')
         run.error = describe(error)
         run.recovery_required = keep_lock
         run.close_unfinished('cancelled' if cancelled else 'blocked')
+        log.info('Execução encerrada: %s: %s', run.state, _summary(error))
         run.save()
         raise
     finally:
@@ -100,8 +111,8 @@ def _execute(
     except RecoveryRequired:
         raise
     except (Exception, KeyboardInterrupt):
-        # An interruption may arrive between two Git calls. Only release the
-        # reservation if the target still matches the last verified revision.
+        # Uma interrupção pode chegar entre duas chamadas ao Git. A reserva só é
+        # liberada se o destino ainda corresponder à última revisão verificada.
         target.verify()
         raise
 
@@ -145,6 +156,7 @@ def _run_tasks(
     run = ctx.state
     tasks = plan['tasks']
     run.state = 'running'
+    log.info('Execução %s: %d tarefa(s) sobre %s em %s', ctx.run_id[:12], len(tasks), target.head[:12], target.branch)
     for task in tasks:
         run.mark(task['id'], 'pending')
     run.save()
@@ -155,6 +167,7 @@ def _run_tasks(
         target.verify()
         ctx.stop.check()
         base = target.head
+        log.info('Lote sobre %s: %s', base[:12], ', '.join(task['id'] for task in batch))
         context = 'Base do código: ' + base
         if plan.get('goal'):
             context += '\nObjetivo geral: ' + str(plan['goal'])
@@ -242,6 +255,7 @@ def run_batch(ctx: RunContext, batch: Sequence[Task], base: str, context: str, m
         except RunCancelled:
             run.mark(task['id'], 'cancelled')
         except Exception as error:
+            log.info('%s: implementação falhou: %s', task['id'], _summary(error))
             run.mark(task['id'], 'failed')
             run.set_details(task['id'], {'error': str(error)})
             if isinstance(error, RecoveryRequired):
@@ -273,7 +287,8 @@ def review_task(
             ctx.stop.check()
             gitops.check_scope(task, Path(artifact.worktree), base)
             with run.phase(task_id, 'review'):
-                approved, feedback, _ = agents.review(task, artifact, tests, ctx.stop)
+                approved, feedback = agents.review(artifact, tests, ctx.stop)
+            log.info('%s: revisão %d %s', task_id, attempt + 1, 'aprovada' if approved else 'rejeitada')
             if approved:
                 return feedback
             if attempt == retries:
@@ -284,6 +299,7 @@ def review_task(
     except RunCancelled:
         raise
     except Exception as error:
+        log.info('%s: revisão falhou: %s', task_id, _summary(error))
         run.mark(task_id, 'failed')
         run.update_details(task_id, error=str(error), review=feedback)
         if isinstance(error, RecoveryRequired):
@@ -345,6 +361,7 @@ def integrate_task(
     except (RunCancelled, IntegrationStateError):
         raise
     except Exception as error:
+        log.info('%s: integração falhou: %s', task_id, _summary(error))
         run.mark(task_id, 'failed')
         run.update_details(task_id, error=str(error), review=feedback)
         if isinstance(error, RecoveryRequired):
@@ -357,7 +374,7 @@ def _persist_integration(ctx: RunContext) -> None:
     try:
         ctx.state.save()
     except (Exception, KeyboardInterrupt) as error:
-        # The previous on-disk snapshot can predate the cherry-pick.
+        # O estado gravado antes pode ser anterior ao cherry-pick.
         raise IntegrationStateError(error) from error
 
 
@@ -371,12 +388,9 @@ def integrate(
     task_id = task['id']
     target.verify()
     candidate = artifact.candidate
-    # Earlier tasks in a parallel batch may have changed the destination tree.
-    # Inspect the actual three-way merge.
-    if target.head == base:
-        merged_tree = candidate
-    else:
-        merged_tree = gitops.git('merge-tree', '--write-tree', target.head, candidate, cwd=root).stdout.strip()
+    # Tarefas anteriores do lote podem ter mudado a árvore de destino; nesse caso
+    # vale o resultado real do merge de três pontas.
+    merged_tree = candidate if target.head == base else gitops.merge_tree(root, target.head, candidate)
     gitops.check_tree_scope(task, root, target.head, merged_tree)
     gitops.protect_untracked_files(root, target.head, merged_tree)
     run.update_details(task_id, commit=candidate, target_before=target.head, review=feedback)
@@ -392,6 +406,7 @@ def integrate(
         integrated_head = gitops.head(root)
     run.update_details(task_id, integrated_commit=integrated_head)
     _persist_integration(ctx)
+    log.info('%s: commit %s aplicado em %s', task_id, integrated_head[:12], target.branch)
     with recovery_on_failure('Escopo do commit integrado não confirmado'):
         gitops.check_tree_scope(task, root, target.head, integrated_head)
     try:
@@ -432,7 +447,7 @@ def _discard_worktree(ctx: RunContext, artifact: Artifact) -> None:
 
 def _abort_cherry_pick(root: Path, target: TargetCheckout) -> None:
     with recovery_on_failure('Falha ao executar abort de cherry-pick'):
-        # Conflicts may dirty the tree, but abort must stay on the original branch.
+        # Conflitos podem sujar a árvore, mas o abort precisa acontecer na branch original.
         if gitops.branch_ref(root) != target.branch:
             raise RecoveryRequired('Branch de destino alterada antes do abort')
         aborted = gitops.git('cherry-pick', '--abort', cwd=root, check=False)
@@ -455,4 +470,5 @@ def _rollback(ctx: RunContext, task_id: str, integrated_head: str, target: Targe
     gitops.check_revision(root, reverted_head, target.branch, recovery=True)
     ctx.state.update_details(task_id, revert_commit=reverted_head)
     _persist_integration(ctx)
+    log.info('%s: integração revertida pelo commit %s', task_id, reverted_head[:12])
     target.head = reverted_head

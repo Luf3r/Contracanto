@@ -29,7 +29,7 @@ class ReviewGateTests(support.RepositoryTestCase):
 
             with patch.object(proc, 'run', side_effect=command):
                 agents.review(
-                    task, agents.Artifact(task=task, worktree=str(root), report='done'), [sys.executable, '-c', 'pass']
+                    agents.Artifact(task=task, worktree=str(root), report='done'), [sys.executable, '-c', 'pass']
                 )
             git('switch', '--detach', base)
             subprocess.run(
@@ -57,7 +57,7 @@ class ReviewGateTests(support.RepositoryTestCase):
 
             with patch.object(proc, 'run', side_effect=command):
                 agents.review(
-                    task, agents.Artifact(task=task, worktree=str(root), report='done'), [sys.executable, '-c', 'pass']
+                    agents.Artifact(task=task, worktree=str(root), report='done'), [sys.executable, '-c', 'pass']
                 )
             git('switch', '--detach', base)
             applied = subprocess.run(['git', 'apply', '-'], input=patches[0].encode(), cwd=root, capture_output=True)

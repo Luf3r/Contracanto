@@ -1,3 +1,0 @@
-# Ferramentas de desenvolvimento; não são necessárias em produção.
-ruff==0.17.5
-mypy==2.4.1

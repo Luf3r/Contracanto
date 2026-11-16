@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import stat
 import subprocess
@@ -72,7 +73,7 @@ def _sparse_checkout_enabled(wt: str | Path) -> bool:
 
 
 def hidden_index_changes(wt: str | Path) -> list[str]:
-    """Inspect masked entries against HEAD without changing the user's index flags."""
+    """Compara com o HEAD as entradas mascaradas, sem mudar as marcas do índice do usuário."""
     masked = set()
     skipped = set()
     changes: list[str] = []
@@ -88,8 +89,8 @@ def hidden_index_changes(wt: str | Path) -> list[str]:
             if (module / '.git').exists():
                 changes.extend(f'{name}/{path}' for path in hidden_index_changes(module))
     if masked:
-        # A fresh index has neither cached stat data nor assume-unchanged/skip-worktree
-        # bits. Git itself compares file modes, symlinks and filtered contents.
+        # Um índice novo não tem dados de stat em cache nem as marcas assume-unchanged e
+        # skip-worktree. O próprio Git compara modos, links simbólicos e conteúdo filtrado.
         with tempfile.TemporaryDirectory() as directory:
             env = {'GIT_INDEX_FILE': str(Path(directory).resolve() / 'index')}
             options = (
@@ -118,7 +119,7 @@ def hidden_index_changes(wt: str | Path) -> list[str]:
             different = masked.intersection(paths)
             missing = {name for name in skipped & different if not os.path.lexists(Path(wt) / name)}
             if missing and _sparse_checkout_enabled(wt):
-                # Only absences outside the configured sparse selection are expected.
+                # Só as ausências fora da seleção esparsa configurada são esperadas.
                 names = ('\0'.join(sorted(missing)) + '\0').encode('utf-8')
                 included = git_records('sparse-checkout', 'check-rules', '-z', cwd=wt, input_bytes=names)
                 different -= missing.difference(included)
@@ -127,7 +128,7 @@ def hidden_index_changes(wt: str | Path) -> list[str]:
 
 
 def changed_files(wt: str | Path) -> list[str]:
-    """Porcelain -z returns raw names; renames contain destination AND source."""
+    """Arquivos alterados; o formato porcelain -z traz nomes crus e, nas renomeações, destino E origem."""
     records = iter(git_records('status', '--porcelain', ALL_SUBMODULES, '-z', '-uall', cwd=wt))
     paths = []
     for record in records:
@@ -155,7 +156,7 @@ def check_scope(task: plan.Task, wt: str | Path, base: str) -> None:
 
 
 def protect_untracked_files(root: Path, before: str, after: str) -> None:
-    """Check added destinations and file/directory replacements, including ignored data."""
+    """Confere destinos adicionados e trocas entre arquivo e diretório, inclusive dados ignorados."""
     added = git_records(
         'diff', '--name-only', '--diff-filter=AT', '--no-renames', ALL_SUBMODULES, '-z', before, after, cwd=root
     )
@@ -175,8 +176,8 @@ def protect_untracked_files(root: Path, before: str, after: str) -> None:
                 break
         if not exists:
             continue
-        # No exclusion options: Git includes ignored files and nested repositories.
-        # Match the on-disk spelling even on case-insensitive filesystems.
+        # Sem opções de exclusão: o Git inclui arquivos ignorados e repositórios aninhados.
+        # Casa a grafia em disco mesmo em sistemas de arquivos que não distinguem maiúsculas.
         relative = path.relative_to(root).as_posix()
         collision = git_records(
             'ls-files', '--others', '--directory', '-z', '--', f':(icase,literal){relative}', cwd=root
@@ -186,7 +187,7 @@ def protect_untracked_files(root: Path, before: str, after: str) -> None:
 
 
 def branch_ref(wt: str | Path) -> str:
-    """Return the full branch ref, or HEAD for a detached checkout."""
+    """Ref completa da branch, ou HEAD em um checkout destacado."""
     result = git('symbolic-ref', '--quiet', 'HEAD', cwd=wt, check=False)
     if result.returncode == 1:
         return 'HEAD'
@@ -208,7 +209,7 @@ def check_git_operation(wt: str | Path) -> None:
 def check_revision(
     wt: str | Path, expected_head: str, expected_branch: str | None = None, recovery: bool = False
 ) -> str:
-    """Verify both commit and checkout identity before trusting repository state."""
+    """Confere o commit e a identidade do checkout antes de confiar no estado do repositório."""
     error_type = RecoveryRequired if recovery else RuntimeError
     try:
         check_git_operation(wt)
@@ -227,9 +228,29 @@ def check_revision(
     return branch
 
 
-def remove_worktree(root: Path, worktree: str | Path, branch: str | None) -> None:
-    """Remove um worktree limpo e a branch dele; o Git recusa worktrees com alterações."""
-    git('worktree', 'remove', str(worktree), cwd=root)
+def merge_tree(root: Path, ours: str, theirs: str) -> str:
+    """Árvore resultante do merge de dois commits, sem tocar no checkout.
+
+    Um conflito vira um erro que nomeia os arquivos: o Git os lista na saída
+    padrão e sai com código 1, sem nada na saída de erro.
+    """
+    result = git('merge-tree', '--write-tree', '--name-only', ours, theirs, cwd=root, check=False)
+    lines = result.stdout.splitlines()
+    if result.returncode == 0 and lines:
+        return lines[0].strip()
+    if result.returncode == 1 and lines:
+        # Depois da árvore vêm os arquivos em conflito, até uma linha em branco.
+        files = list(itertools.takewhile(str.strip, lines[1:]))
+        raise RuntimeError('Conflito com alterações já integradas neste lote: ' + (', '.join(files) or 'sem detalhes'))
+    raise RuntimeError(f'git merge-tree falhou ({result.returncode}): {result.stderr[-config.ERROR_TAIL :]}')
+
+
+def remove_worktree(root: Path, worktree: str | Path, branch: str | None, force: bool = False) -> None:
+    """Remove um worktree e a branch dele.
+
+    Sem `force`, o Git recusa worktrees com alterações; com ele, elas são descartadas.
+    """
+    git('worktree', 'remove', *(['--force'] if force else []), str(worktree), cwd=root)
     if branch and branch != 'HEAD':
         git('branch', '-D', branch.removeprefix('refs/heads/'), cwd=root)
 
@@ -265,12 +286,12 @@ def run_tests(
     expected_branch: str | None = None,
     stop: StopSignal | None = None,
 ) -> subprocess.CompletedProcess:
-    """Tests must preserve the commit, branch (including detached HEAD), and files."""
+    """Roda os testes, que devem preservar o commit, a branch (ou o HEAD destacado) e os arquivos."""
     expected_branch = check_revision(wt, expected_head, expected_branch, recovery)
     try:
         result = process.run(command, cwd=wt, timeout=config.TEST_TIMEOUT, check=False, stop=stop)
     except RecoveryRequired:
-        # A dirty worktree must not hide an unconfirmed process termination.
+        # Um worktree sujo não pode esconder um encerramento de processos não confirmado.
         raise
     except (Exception, KeyboardInterrupt):
         check_revision(wt, expected_head, expected_branch, recovery)

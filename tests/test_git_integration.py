@@ -55,7 +55,7 @@ class GitIntegrationTests(unittest.TestCase):
                 stack.enter_context(patch.object(gitops, 'git', side_effect=git))
                 stack.enter_context(patch.object(runner.shutil, 'which', return_value='tool'))
                 stack.enter_context(patch.object(agents, 'run_executor', side_effect=executor))
-                stack.enter_context(patch.object(agents, 'review', return_value=(True, 'APPROVED', '')))
+                stack.enter_context(patch.object(agents, 'review', return_value=(True, 'APPROVED')))
                 stack.enter_context(patch.object(proc, 'run', side_effect=error))
                 plan = {
                     'tasks': [dict(id='A', description='Change', deps=[], files=['feature.txt'], acceptance=['Pass'])]

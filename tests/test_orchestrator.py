@@ -64,9 +64,7 @@ class RegressionTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, b'' if '--binary' in args else '', '')
 
         with patch.object(proc, 'run', side_effect=command):
-            agents.review(
-                task('A'), agents.Artifact(task=task('A'), worktree='.', report='done'), ['python', 'test.py']
-            )
+            agents.review(agents.Artifact(task=task('A'), worktree='.', report='done'), ['python', 'test.py'])
         review_args = next(args for args in calls if args[0] == 'claude')
         self.assertEqual(review_args[review_args.index('--model') + 1], 'sonnet')
 
@@ -92,7 +90,7 @@ class RegressionTests(unittest.TestCase):
             for module, target, kwargs in [
                 (gitops, 'git', {'side_effect': git}),
                 (agents, 'run_executor', {'side_effect': executor or artifact}),
-                (agents, 'review', {'return_value': (True, 'APPROVED', '')}),
+                (agents, 'review', {'return_value': (True, 'APPROVED')}),
                 (
                     proc,
                     'run',

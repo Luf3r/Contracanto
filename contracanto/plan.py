@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from typing import Any, NotRequired, TypedDict
@@ -23,6 +24,17 @@ class Task(TypedDict):
 class Plan(TypedDict):
     tasks: list[Task]
     goal: NotRequired[str]
+
+
+def parse_command(raw: str, name: str) -> list[str]:
+    """Comando recebido como lista JSON de argumentos; `name` identifica o campo no erro."""
+    try:
+        command = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(f'{name} não é JSON válido: {error}') from error
+    if not isinstance(command, list) or not command or any(not isinstance(value, str) for value in command):
+        raise ValueError(f'{name} deve ser uma lista não vazia de strings')
+    return command
 
 
 def covers(entry: str, path: str) -> bool:

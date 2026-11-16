@@ -97,7 +97,10 @@ class IntegrationGateTests(support.RepositoryTestCase):
                 git('switch', '-c', 'release')
                 raise RuntimeError('executor failed')
 
-            with patch.object(agents, 'run_agy', side_effect=switch_and_fail):
+            with (
+                patch.object(agents, 'run_agy', side_effect=switch_and_fail),
+                patch.object(agents.config, 'IMPLEMENT_RETRIES', 0),
+            ):
                 try:
                     runner.execute(self.ws, {'tasks': [task]}, 1, 0, ['test'])
                 except errors.RecoveryRequired:
