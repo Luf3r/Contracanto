@@ -1,15 +1,15 @@
 """MVP local de orquestração Claude -> Antigravity, para um repositório Git confiável.
 Executa o comando de testes com as permissões locais do worker. Requer CLIs autenticados.
 """
+
 from __future__ import annotations
+
 import argparse
 import concurrent.futures
 import contextlib
-from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import signal
@@ -19,6 +19,8 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 
 if os.name == 'nt':
     from windows_job import WindowsJob
@@ -82,7 +84,9 @@ def reserve_run():
         with (STORE / 'run.lock').open('x', encoding='utf-8') as handle:
             json.dump({'run_id': reservation_id(token), 'pid': os.getpid(), 'supports_stop': True}, handle)
     except FileExistsError:
-        raise RuntimeError('Já existe execução reservada; consulte get_run_status e o procedimento de recuperação') from None
+        raise RuntimeError(
+            'Já existe execução reservada; consulte get_run_status e o procedimento de recuperação'
+        ) from None
     return token
 
 
@@ -134,16 +138,28 @@ def wait_posix_group(pid):
         time.sleep(0.02)
 
 
-def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=False,
-        raw_paths=False, binary_output=False, env_overrides=None):
-    options = ({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW | WindowsJob.creationflags}
-               if os.name == 'nt' else {'start_new_session': True})
+def cmd(
+    args,
+    cwd=ROOT,
+    timeout=1800,
+    check=True,
+    input_text=None,
+    cancellable=False,
+    raw_paths=False,
+    binary_output=False,
+    env_overrides=None,
+):
+    options = (
+        {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW | WindowsJob.creationflags}
+        if os.name == 'nt'
+        else {'start_new_session': True}
+    )
     env = dict(os.environ, PYTHONIOENCODING='utf-8')
     if env_overrides:
         env.update(env_overrides)
     # Close the job before Popen's pipe cleanup: surviving children may still
     # hold those pipes open if explicit termination failed.
-    with contextlib.ExitStack() as processes, (WindowsJob() if os.name == 'nt' else contextlib.nullcontext()) as job:
+    with contextlib.ExitStack() as processes, WindowsJob() if os.name == 'nt' else contextlib.nullcontext() as job:
         process = None
         poll_stop = cancellable and STOP_FILE is not None
         stdin = subprocess.PIPE
@@ -161,10 +177,17 @@ def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=F
             # NUL-delimited Git paths must not undergo universal newline translation
             # or lossy decoding before the ownership and checkout checks.
             raw = raw_paths or binary_output
-            process = subprocess.Popen(args, cwd=str(cwd), stdin=stdin,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       encoding=None if raw else 'utf-8',
-                                       errors=None if raw else 'replace', env=env, **options)
+            process = subprocess.Popen(
+                args,
+                cwd=str(cwd),
+                stdin=stdin,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding=None if raw else 'utf-8',
+                errors=None if raw else 'replace',
+                env=env,
+                **options,
+            )
             processes.enter_context(process)
             if job is not None:
                 job.start(process.pid)
@@ -221,8 +244,16 @@ def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=F
 
 
 def git(*args, cwd=ROOT, check=True, env_overrides=None, input_bytes=None):
-    return cmd(['git', *args], cwd=cwd, timeout=180, check=check, raw_paths='-z' in args,
-               binary_output='--binary' in args, env_overrides=env_overrides, input_text=input_bytes)
+    return cmd(
+        ['git', *args],
+        cwd=cwd,
+        timeout=180,
+        check=check,
+        raw_paths='-z' in args,
+        binary_output='--binary' in args,
+        env_overrides=env_overrides,
+        input_text=input_bytes,
+    )
 
 
 def hidden_index_changes(wt):
@@ -247,15 +278,36 @@ def hidden_index_changes(wt):
         # bits. Git itself compares file modes, symlinks and filtered contents.
         with tempfile.TemporaryDirectory(dir=STORE) as directory:
             env = {'GIT_INDEX_FILE': str(Path(directory).resolve() / 'index')}
-            config = ('-c', 'core.sparseCheckout=false', '-c', 'core.ignoreStat=false',
-                      '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false')
+            config = (
+                '-c',
+                'core.sparseCheckout=false',
+                '-c',
+                'core.ignoreStat=false',
+                '-c',
+                'core.fsmonitor=false',
+                '-c',
+                'core.splitIndex=false',
+            )
             git(*config, 'read-tree', 'HEAD', cwd=wt, env_overrides=env)
-            paths = git(*config, 'diff', '--name-only', '--no-renames', '--ignore-submodules=none',
-                        '-z', 'HEAD', '--', cwd=wt, env_overrides=env).stdout
+            paths = git(
+                *config,
+                'diff',
+                '--name-only',
+                '--no-renames',
+                '--ignore-submodules=none',
+                '-z',
+                'HEAD',
+                '--',
+                cwd=wt,
+                env_overrides=env,
+            ).stdout
             different = masked.intersection(paths.split('\0'))
             missing = {name for name in skipped & different if not os.path.lexists(Path(wt) / name)}
-            if missing and git('config', '--bool', '--get', 'core.sparseCheckout',
-                               cwd=wt, check=False).stdout.strip() == 'true':
+            if (
+                missing
+                and git('config', '--bool', '--get', 'core.sparseCheckout', cwd=wt, check=False).stdout.strip()
+                == 'true'
+            ):
                 # Only absences outside the configured sparse selection are expected.
                 names = ('\0'.join(sorted(missing)) + '\0').encode('utf-8')
                 included = git('sparse-checkout', 'check-rules', '-z', cwd=wt, input_bytes=names)
@@ -279,14 +331,14 @@ def changed_files(wt):
 
 def check_paths_in_scope(task, paths):
     for name in paths:
-        if not any(name == item.rstrip('/') or name.startswith(item.rstrip('/') + '/')
-                   for item in task['files']):
+        if not any(name == item.rstrip('/') or name.startswith(item.rstrip('/') + '/') for item in task['files']):
             raise RuntimeError(f'Arquivo fora do escopo em {task["id"]}: {name}')
 
 
 def check_tree_scope(task, wt, before, after):
-    paths = git('diff', '--name-only', '--no-renames', '--ignore-submodules=none',
-                '-z', before, after, cwd=wt).stdout.split('\0')
+    paths = git(
+        'diff', '--name-only', '--no-renames', '--ignore-submodules=none', '-z', before, after, cwd=wt
+    ).stdout.split('\0')
     check_paths_in_scope(task, filter(None, paths))
 
 
@@ -297,8 +349,9 @@ def check_scope(task, wt, base):
 
 def protect_untracked_files(before, after):
     """Check added destinations and file/directory replacements, including ignored data."""
-    added = git('diff', '--name-only', '--diff-filter=AT', '--no-renames',
-                '--ignore-submodules=none', '-z', before, after).stdout
+    added = git(
+        'diff', '--name-only', '--diff-filter=AT', '--no-renames', '--ignore-submodules=none', '-z', before, after
+    ).stdout
     for name in filter(None, added.split('\0')):
         path = ROOT
         for part in name.split('/'):
@@ -317,8 +370,7 @@ def protect_untracked_files(before, after):
         # No exclusion options: Git includes ignored files and nested repositories.
         # Match the on-disk spelling even on case-insensitive filesystems.
         relative = path.relative_to(ROOT).as_posix()
-        collision = git('ls-files', '--others', '--directory', '-z',
-                        '--', f':(icase,literal){relative}').stdout
+        collision = git('ls-files', '--others', '--directory', '-z', '--', f':(icase,literal){relative}').stdout
         if collision:
             first_path = collision.partition('\0')[0]
             raise RuntimeError(f'Arquivo local seria sobrescrito: {first_path}')
@@ -336,8 +388,15 @@ def branch_ref(wt):
 
 def check_git_operation(wt):
     git_dir = Path(git('rev-parse', '--absolute-git-dir', cwd=wt).stdout.rstrip('\r\n'))
-    for marker in ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-apply',
-                   'rebase-merge', 'sequencer', 'BISECT_START'):
+    for marker in (
+        'MERGE_HEAD',
+        'CHERRY_PICK_HEAD',
+        'REVERT_HEAD',
+        'rebase-apply',
+        'rebase-merge',
+        'sequencer',
+        'BISECT_START',
+    ):
         try:
             (git_dir / marker).stat()
         except FileNotFoundError:
@@ -351,9 +410,11 @@ def check_revision(wt, expected_head, expected_branch=None, recovery=False):
     try:
         check_git_operation(wt)
         branch = branch_ref(wt)
-        changed = ((expected_branch is not None and branch != expected_branch)
-                   or git('rev-parse', 'HEAD', cwd=wt).stdout.strip() != expected_head
-                   or changed_files(wt))
+        changed = (
+            (expected_branch is not None and branch != expected_branch)
+            or git('rev-parse', 'HEAD', cwd=wt).stdout.strip() != expected_head
+            or changed_files(wt)
+        )
     except (Exception, KeyboardInterrupt) as error:
         if recovery:
             raise RecoveryRequired(f'Não foi possível verificar branch, HEAD e arquivos: {error}') from error
@@ -390,9 +451,24 @@ def run_tests(command, wt, expected_head, recovery=False, expected_branch=None):
 def run_agy(prompt, wt):
     # NDJSON stdin avoids Windows command-line limits, including during repairs.
     payload = json.dumps({'event': 'user', 'message': {'content': prompt}}, ensure_ascii=False) + '\n'
-    result = cmd(['agy', '--input-format', 'stream-json', '--output-format', 'stream-json',
-                  '--sandbox', '--mode', 'auto', '--print-timeout', '25m'],
-                 cwd=wt, timeout=1600, input_text=payload, cancellable=True)
+    result = cmd(
+        [
+            'agy',
+            '--input-format',
+            'stream-json',
+            '--output-format',
+            'stream-json',
+            '--sandbox',
+            '--mode',
+            'auto',
+            '--print-timeout',
+            '25m',
+        ],
+        cwd=wt,
+        timeout=1600,
+        input_text=payload,
+        cancellable=True,
+    )
     events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
     results = [event['result'] for event in events if event.get('event') == 'result']
     if len(results) != 1:
@@ -425,18 +501,30 @@ def validate(plan):
         raise ValueError('IDs duplicados (sem distinguir maiúsculas/minúsculas) ou inválidos')
     lookup = set(ids)
     for t in tasks:
-        if not isinstance(t.get('description'), str) or not t['description'].strip() or not isinstance(t.get('deps'), list):
+        if (
+            not isinstance(t.get('description'), str)
+            or not t['description'].strip()
+            or not isinstance(t.get('deps'), list)
+        ):
             raise ValueError(f'Tarefa incompleta: {t}')
         if any(not isinstance(d, str) or d not in lookup or d == t['id'] for d in t['deps']):
             raise ValueError(f'Dependência inválida: {t["id"]}')
         for key in ('files', 'acceptance'):
             values = t.get(key)
-            if not isinstance(values, list) or not values or any(not isinstance(v, str) or not v.strip() for v in values):
+            if (
+                not isinstance(values, list)
+                or not values
+                or any(not isinstance(v, str) or not v.strip() for v in values)
+            ):
                 raise ValueError(f'{key} deve ser lista não vazia de strings')
         for name in t['files']:
             parts = name.rstrip('/').split('/')
-            if ('\\' in name or ':' in name or any(p in ('', '.', '..') for p in parts)
-                    or any(p.lower() in ('.git', '.agent-runs') for p in parts)):
+            if (
+                '\\' in name
+                or ':' in name
+                or any(p in ('', '.', '..') for p in parts)
+                or any(p.lower() in ('.git', '.agent-runs') for p in parts)
+            ):
                 raise ValueError(f'Caminho de escopo inválido: {name}')
     # Detectar ciclos.
     done = set()
@@ -455,7 +543,11 @@ def parse_json_output(stdout, engine):
         return str(data.get('response', ''))
     if data.get('is_error'):
         raise RuntimeError('Claude retornou erro')
-    return '\n'.join(x.get('text', '') for x in data.get('result', []) if isinstance(x, dict)) if isinstance(data.get('result'), list) else str(data.get('result', ''))
+    return (
+        '\n'.join(x.get('text', '') for x in data.get('result', []) if isinstance(x, dict))
+        if isinstance(data.get('result'), list)
+        else str(data.get('result', ''))
+    )
 
 
 def make_worktree(task, base):
@@ -471,11 +563,13 @@ def run_executor(task, base, context):
     check_stop()
     wt = make_worktree(task, base)
     branch = branch_ref(wt)
-    prompt = ('Você está implementando UMA tarefa no Git worktree atual. '
-              'Leia GEMINI.md quando presente. Preserve a branch atual. Não altere arquitetura, não faça commit/push/deploy. '
-              'Não acesse segredos. NÃO altere arquivos fora da lista files. '
-              'Se houver conflito de escopo, reporte sem implementar.\n' +
-              json.dumps({'task':task,'context':context}, ensure_ascii=False))
+    prompt = (
+        'Você está implementando UMA tarefa no Git worktree atual. '
+        'Leia GEMINI.md quando presente. Preserve a branch atual. Não altere arquitetura, não faça commit/push/deploy. '
+        'Não acesse segredos. NÃO altere arquivos fora da lista files. '
+        'Se houver conflito de escopo, reporte sem implementar.\n'
+        + json.dumps({'task': task, 'context': context}, ensure_ascii=False)
+    )
     report = run_agy(prompt, wt)
     check_executor_checkout(wt, base, branch)
     # Verifica modificações fora do escopo, incluindo arquivos ainda não rastreados.
@@ -484,9 +578,18 @@ def run_executor(task, base, context):
     if not changed:
         raise RuntimeError(f'Gemini não alterou arquivos em {task["id"]}')
     git('add', '--all', '--', '.', cwd=wt)
-    git('-c', 'user.name=Agent Executor', '-c', 'user.email=agent@localhost', 'commit', '-m', f'agent: {task["id"]}', cwd=wt)
+    git(
+        '-c',
+        'user.name=Agent Executor',
+        '-c',
+        'user.email=agent@localhost',
+        'commit',
+        '-m',
+        f'agent: {task["id"]}',
+        cwd=wt,
+    )
     commit = git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
-    return {'task':task, 'commit':commit, 'branch':branch, 'worktree':str(wt), 'report':report, 'context':context}
+    return {'task': task, 'commit': commit, 'branch': branch, 'worktree': str(wt), 'report': report, 'context': context}
 
 
 def check_executor_checkout(wt, head, branch):
@@ -503,7 +606,9 @@ def review(task, artifact, test_command):
     test = run_tests(test_command, wt, head, expected_branch=artifact.get('branch')) if test_command else None
     test_output = (test.stdout + '\n' + test.stderr)[-10000:] if test else 'Nenhum comando de teste configurado'
     diff = git('show', '--format=medium', '--stat', '--ignore-submodules=none', 'HEAD', cwd=wt).stdout
-    patch_bytes = git('show', '--format=', '--binary', '--no-textconv', '--no-ext-diff', '--ignore-submodules=none', 'HEAD', cwd=wt).stdout
+    patch_bytes = git(
+        'show', '--format=', '--binary', '--no-textconv', '--no-ext-diff', '--ignore-submodules=none', 'HEAD', cwd=wt
+    ).stdout
     # Latin-1 is a reversible mapping even for a patch with mixed encodings.
     for encoding in ('utf-8', 'cp1252', 'latin-1'):
         try:
@@ -511,16 +616,44 @@ def review(task, artifact, test_command):
             break
         except UnicodeDecodeError:
             continue
-    prompt = ('Você é revisor de código. Verifique a task e o diff contra critérios de aceitação. '
-              'Responda EXATAMENTE com uma palavra na primeira linha: APPROVED ou REJECTED. '
-              'Nas linhas seguintes explique problemas encontrados. Testes não executados NÃO equivalem a testes aprovados. '
-              'Não modifique arquivos.\n' + json.dumps({'task': task, 'context': artifact.get('context', ''), 'diff_summary':diff,
-                     'patch':patch, 'patch_encoding':encoding, 'executor_report':artifact['report'],
-                     'test_exit_code':test.returncode if test else None,
-                     'test_output':test_output}, ensure_ascii=False))
-    response = cmd(['claude', '-p', '--model', 'sonnet', '--output-format', 'json',
-                    '--max-turns', '1', '--tools', '', '--strict-mcp-config'],
-                   cwd=wt, timeout=900, input_text=prompt, cancellable=True)
+    prompt = (
+        'Você é revisor de código. Verifique a task e o diff contra critérios de aceitação. '
+        'Responda EXATAMENTE com uma palavra na primeira linha: APPROVED ou REJECTED. '
+        'Nas linhas seguintes explique problemas encontrados. Testes não executados NÃO equivalem a testes aprovados. '
+        'Não modifique arquivos.\n'
+        + json.dumps(
+            {
+                'task': task,
+                'context': artifact.get('context', ''),
+                'diff_summary': diff,
+                'patch': patch,
+                'patch_encoding': encoding,
+                'executor_report': artifact['report'],
+                'test_exit_code': test.returncode if test else None,
+                'test_output': test_output,
+            },
+            ensure_ascii=False,
+        )
+    )
+    response = cmd(
+        [
+            'claude',
+            '-p',
+            '--model',
+            'sonnet',
+            '--output-format',
+            'json',
+            '--max-turns',
+            '1',
+            '--tools',
+            '',
+            '--strict-mcp-config',
+        ],
+        cwd=wt,
+        timeout=900,
+        input_text=prompt,
+        cancellable=True,
+    )
     verdict = parse_json_output(response.stdout, 'claude').strip()
     approved = verdict.splitlines()[0:1] == ['APPROVED'] and test is not None and test.returncode == 0
     if test is not None and test.returncode:
@@ -541,15 +674,16 @@ def execute(plan, max_workers, retries, tests, reservation=None):
     except FileExistsError:
         raise RuntimeError('Reserva já assumida por outro worker') from None
     except (OSError, KeyboardInterrupt) as error:
-        raise RecoveryRequired('Não foi possível assumir a reserva; inspecione run.lock e o diretório da execução') from error
+        raise RecoveryRequired(
+            'Não foi possível assumir a reserva; inspecione run.lock e o diretório da execução'
+        ) from error
     RUN_DIR = run_dir
     STOP_FILE = STORE / f'stop-{run_id}'
     keep_lock = False
     state_initialized = False
     try:
         # CLI e MCP começam com estado próprio antes de qualquer preparação.
-        write_json(STORE / 'status.json', {'state': 'starting', 'run_id': run_id,
-                                         'statuses': {}, 'details': {}})
+        write_json(STORE / 'status.json', {'state': 'starting', 'run_id': run_id, 'statuses': {}, 'details': {}})
         state_initialized = True
         if isinstance(plan, Path):
             plan = json.loads(plan.read_text(encoding='utf-8'))
@@ -579,8 +713,12 @@ def execute(plan, max_workers, retries, tests, reservation=None):
         # A later persistence error must never clear an earlier recovery flag.
         keep_lock = keep_lock or state.get('recovery_required', False)
         cancelled = isinstance(error, RunCancelled) and not keep_lock
-        state.update(state='cancelled' if cancelled else 'failed', run_id=run_id, error=str(error) or type(error).__name__,
-                     recovery_required=keep_lock)
+        state.update(
+            state='cancelled' if cancelled else 'failed',
+            run_id=run_id,
+            error=str(error) or type(error).__name__,
+            recovery_required=keep_lock,
+        )
         for tid, value in state.get('statuses', {}).items():
             if value in ('pending', 'running', 'review'):
                 state['statuses'][tid] = 'cancelled' if cancelled else 'blocked'
@@ -626,9 +764,13 @@ def persist_integration_state(statuses, details):
 def _run_tasks(plan, max_workers, retries, tests, target):
     statuses = {t['id']: 'pending' for t in plan['tasks']}
     details = {}
-    write_json(STORE / 'status.json', {'statuses':statuses, 'details':details})
+    write_json(STORE / 'status.json', {'statuses': statuses, 'details': details})
     for _ in range(len(plan['tasks'])):
-        ready = [t for t in plan['tasks'] if statuses[t['id']]=='pending' and all(statuses[x]=='approved' for x in t['deps'])]
+        ready = [
+            t
+            for t in plan['tasks']
+            if statuses[t['id']] == 'pending' and all(statuses[x] == 'approved' for x in t['deps'])
+        ]
         if not ready:
             break
         # Evita tarefas concorrentes que anunciam ownership sobreposto.
@@ -636,7 +778,11 @@ def _run_tasks(plan, max_workers, retries, tests, target):
         owned = set()
         for t in ready:
             files = set(t.get('files', []))
-            if any(x == y or x.startswith(y.rstrip('/') + '/') or y.startswith(x.rstrip('/') + '/') for x in files for y in owned):
+            if any(
+                x == y or x.startswith(y.rstrip('/') + '/') or y.startswith(x.rstrip('/') + '/')
+                for x in files
+                for y in owned
+            ):
                 continue
             batch.append(t)
             owned |= files
@@ -650,7 +796,7 @@ def _run_tasks(plan, max_workers, retries, tests, target):
             context += '\nObjetivo geral: ' + str(plan['goal'])
         for t in batch:
             statuses[t['id']] = 'running'
-        write_json(STORE/'status.json', {'statuses':statuses,'details':details})
+        write_json(STORE / 'status.json', {'statuses': statuses, 'details': details})
         jobs = {}
         artifacts = []
         recovery_error = None
@@ -660,16 +806,16 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                 for t in batch:
                     jobs[pool.submit(run_executor, t, base, context)] = t
                 for future in concurrent.futures.as_completed(jobs):
-                    t=jobs[future]
+                    t = jobs[future]
                     try:
                         artifact = future.result()
-                        statuses[t['id']]='review'
+                        statuses[t['id']] = 'review'
                         artifacts.append(artifact)
                     except RunCancelled:
                         statuses[t['id']] = 'cancelled'
                     except Exception as e:
-                        statuses[t['id']]='failed'
-                        details[t['id']]={'error':str(e)}
+                        statuses[t['id']] = 'failed'
+                        details[t['id']] = {'error': str(e)}
                         if isinstance(e, RecoveryRequired):
                             recovery_error = e
         except (Exception, KeyboardInterrupt) as interruption:
@@ -686,7 +832,9 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                     if isinstance(error, RecoveryRequired):
                         recovery_error = error
             if recovery_error is not None:
-                raise RecoveryRequired(f'Execução interrompida com recuperação pendente: {recovery_error}') from interruption
+                raise RecoveryRequired(
+                    f'Execução interrompida com recuperação pendente: {recovery_error}'
+                ) from interruption
             if len(jobs) != len(batch):
                 raise RecoveryRequired('Submissão dos workers interrompida; resultados incompletos') from interruption
             raise
@@ -694,15 +842,15 @@ def _run_tasks(plan, max_workers, retries, tests, target):
             for tid, state in statuses.items():
                 if state in ('pending', 'review', 'running'):
                     statuses[tid] = 'blocked'
-            write_json(STORE/'status.json', {'statuses': statuses, 'details': details, 'recovery_required': True})
+            write_json(STORE / 'status.json', {'statuses': statuses, 'details': details, 'recovery_required': True})
             return statuses
-        write_json(STORE/'status.json', {'statuses':statuses,'details':details})
+        write_json(STORE / 'status.json', {'statuses': statuses, 'details': details})
         check_stop()
         for artifact in artifacts:
             t = artifact['task']
             details[t['id']] = {'worktree': artifact['worktree'], 'commit': artifact['commit']}
-            feedback=''
-            for attempt in range(retries+1):
+            feedback = ''
+            for attempt in range(retries + 1):
                 try:
                     check_stop()
                     check_scope(t, Path(artifact['worktree']), base)
@@ -712,15 +860,18 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                         candidate = artifact['commit']
                         # Earlier tasks in a parallel batch may have changed the
                         # destination tree. Inspect the actual three-way merge.
-                        merged_tree = (candidate if target.head == base else
-                                       git('merge-tree', '--write-tree', target.head, candidate).stdout.strip())
+                        merged_tree = (
+                            candidate
+                            if target.head == base
+                            else git('merge-tree', '--write-tree', target.head, candidate).stdout.strip()
+                        )
                         check_tree_scope(t, ROOT, target.head, merged_tree)
                         protect_untracked_files(target.head, merged_tree)
                         details[t['id']].update(commit=candidate, target_before=target.head, review=feedback)
                         write_json(STORE / 'status.json', {'statuses': statuses, 'details': details})
                         check_stop()
                         try:
-                            applied=git('cherry-pick', artifact['commit'], check=False)
+                            applied = git('cherry-pick', artifact['commit'], check=False)
                         except (Exception, KeyboardInterrupt) as error:
                             # O comando pode ter aplicado o commit antes de perdermos
                             # seu resultado. Não é seguro integrar outra tarefa.
@@ -730,7 +881,7 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                                 # Conflicts may dirty the tree, but abort must stay on the original branch.
                                 if branch_ref(ROOT) != target.branch:
                                     raise RecoveryRequired('Branch de destino alterada antes do abort')
-                                aborted = git('cherry-pick','--abort', check=False)
+                                aborted = git('cherry-pick', '--abort', check=False)
                             except (Exception, KeyboardInterrupt) as error:
                                 raise RecoveryRequired(f'Falha ao executar abort de cherry-pick: {error}') from error
                             if aborted.returncode:
@@ -749,26 +900,33 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                         except (Exception, KeyboardInterrupt) as error:
                             raise RecoveryRequired(f'Escopo do commit integrado não confirmado: {error}') from error
                         try:
-                            integrated=run_tests(tests, ROOT, integrated_head, recovery=True,
-                                                 expected_branch=target.branch)
+                            integrated = run_tests(
+                                tests, ROOT, integrated_head, recovery=True, expected_branch=target.branch
+                            )
                             check_stop()
                             if integrated.returncode:
-                                raise RuntimeError('Testes de integração falharam: ' + (integrated.stdout + integrated.stderr)[-2000:])
+                                raise RuntimeError(
+                                    'Testes de integração falharam: ' + (integrated.stdout + integrated.stderr)[-2000:]
+                                )
                         except RecoveryRequired:
                             raise
                         except (Exception, KeyboardInterrupt) as integration_error:
                             check_revision(ROOT, integrated_head, target.branch, recovery=True)
                             try:
                                 protect_untracked_files(integrated_head, target.head)
-                                revert = git('revert','--no-edit',integrated_head,check=False)
+                                revert = git('revert', '--no-edit', integrated_head, check=False)
                             except (Exception, KeyboardInterrupt) as error:
                                 raise RecoveryRequired(f'Falha ao executar revert: {error}') from error
                             if revert.returncode:
-                                raise RecoveryRequired('Testes falharam e o revert automático também; revisão manual necessária')
+                                raise RecoveryRequired(
+                                    'Testes falharam e o revert automático também; revisão manual necessária'
+                                ) from integration_error
                             try:
                                 reverted_head = git('rev-parse', 'HEAD').stdout.strip()
                             except (Exception, KeyboardInterrupt) as error:
-                                raise RecoveryRequired(f'Não foi possível identificar o HEAD após revert: {error}') from error
+                                raise RecoveryRequired(
+                                    f'Não foi possível identificar o HEAD após revert: {error}'
+                                ) from error
                             check_revision(ROOT, reverted_head, target.branch, recovery=True)
                             details[t['id']]['revert_commit'] = reverted_head
                             persist_integration_state(statuses, details)
@@ -776,79 +934,111 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                             if isinstance(integration_error, (KeyboardInterrupt, RunCancelled)):
                                 raise
                             raise RuntimeError(f'Integração revertida: {integration_error}') from integration_error
-                        statuses[t['id']]='approved'
+                        statuses[t['id']] = 'approved'
                         persist_integration_state(statuses, details)
                         target.head = integrated_head
                         break
                     if attempt == retries:
-                        raise RuntimeError('Rejeitado após tentativas: '+feedback[-2000:])
-                    wt=Path(artifact['worktree'])
-                    correction = run_agy('Corrija a tarefa abaixo considerando a revisão. Preserve a branch atual. Não faça commit/push/deploy. Não modifique arquivos fora de files.\n' + json.dumps({'task': t, 'context': context, 'review': feedback}, ensure_ascii=False), wt)
+                        raise RuntimeError('Rejeitado após tentativas: ' + feedback[-2000:])
+                    wt = Path(artifact['worktree'])
+                    correction = run_agy(
+                        'Corrija a tarefa abaixo considerando a revisão. Preserve a branch atual. Não faça commit/push/deploy. Não modifique arquivos fora de files.\n'
+                        + json.dumps({'task': t, 'context': context, 'review': feedback}, ensure_ascii=False),
+                        wt,
+                    )
                     artifact['report'] += '\nCorreção: ' + correction
                     check_executor_checkout(wt, artifact['commit'], artifact['branch'])
                     check_scope(t, wt, base)
                     modified = changed_files(wt)
                     if modified:
-                        git('add','--all','--','.',cwd=wt)
-                        git('-c','user.name=Agent Executor','-c','user.email=agent@localhost','commit','-m',f'agent: repair {t["id"]}',cwd=wt)
+                        git('add', '--all', '--', '.', cwd=wt)
+                        git(
+                            '-c',
+                            'user.name=Agent Executor',
+                            '-c',
+                            'user.email=agent@localhost',
+                            'commit',
+                            '-m',
+                            f'agent: repair {t["id"]}',
+                            cwd=wt,
+                        )
                         # Tem que integrar a sequência inteira, não apenas o último commit.
                         # Faz squash da branch sobre base original no worktree.
-                        original_base=base
-                        git('reset','--soft',original_base,cwd=wt)
-                        git('-c','user.name=Agent Executor','-c','user.email=agent@localhost','commit','-m',f'agent: {t["id"]} revised',cwd=wt)
-                        artifact['commit']=git('rev-parse','HEAD',cwd=wt).stdout.strip()
+                        original_base = base
+                        git('reset', '--soft', original_base, cwd=wt)
+                        git(
+                            '-c',
+                            'user.name=Agent Executor',
+                            '-c',
+                            'user.email=agent@localhost',
+                            'commit',
+                            '-m',
+                            f'agent: {t["id"]} revised',
+                            cwd=wt,
+                        )
+                        artifact['commit'] = git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
                 except (RunCancelled, IntegrationStateError):
                     raise
                 except Exception as e:
-                    statuses[t['id']]='failed'
+                    statuses[t['id']] = 'failed'
                     details[t['id']].update(error=str(e), review=feedback)
                     if isinstance(e, RecoveryRequired):
                         for tid, state in statuses.items():
                             if state in ('pending', 'review', 'running'):
                                 statuses[tid] = 'blocked'
-                        write_json(STORE/'status.json', {'statuses':statuses,'details':details, 'recovery_required': True})
+                        write_json(
+                            STORE / 'status.json', {'statuses': statuses, 'details': details, 'recovery_required': True}
+                        )
                         return statuses
                     break
             if statuses[t['id']] != 'approved':
-                write_json(STORE/'status.json', {'statuses':statuses,'details':details})
+                write_json(STORE / 'status.json', {'statuses': statuses, 'details': details})
     while True:
-        blocked = [t['id'] for t in plan['tasks'] if statuses[t['id']] == 'pending'
-                   and any(statuses[x] in ('failed', 'blocked') for x in t['deps'])]
+        blocked = [
+            t['id']
+            for t in plan['tasks']
+            if statuses[t['id']] == 'pending' and any(statuses[x] in ('failed', 'blocked') for x in t['deps'])
+        ]
         if not blocked:
             break
         for tid in blocked:
             statuses[tid] = 'blocked'
-    write_json(STORE/'status.json', {'statuses':statuses,'details':details})
+    write_json(STORE / 'status.json', {'statuses': statuses, 'details': details})
     target.verify()
     return statuses
 
 
 def main():
-    p=argparse.ArgumentParser()
+    p = argparse.ArgumentParser()
     action = p.add_mutually_exclusive_group(required=True)
     action.add_argument('plan', type=Path, nargs='?')
     action.add_argument('--stop', action='store_true', help='Solicita o encerramento da execução ativa')
-    p.add_argument('--parallel',type=int,default=3)
-    p.add_argument('--retries',type=int,default=2)
+    p.add_argument('--parallel', type=int, default=3)
+    p.add_argument('--retries', type=int, default=2)
     p.add_argument('--reservation', help=argparse.SUPPRESS)
-    p.add_argument('--test', nargs=argparse.REMAINDER, default=None,
-                   help='Última opção. Comando confiável executado com as permissões do worker antes da revisão e na integração.')
-    args=p.parse_args()
+    p.add_argument(
+        '--test',
+        nargs=argparse.REMAINDER,
+        default=None,
+        help='Última opção. Comando confiável executado com as permissões do worker antes da revisão e na integração.',
+    )
+    args = p.parse_args()
     if args.stop:
         print(request_stop())
         return
     if args.parallel < 1 or args.parallel > 8 or args.retries not in range(4):
         p.error('parallel deve ser 1..8, retries 0..3')
     if args.reservation:
-        result=execute(args.plan,args.parallel,args.retries,args.test,reservation=args.reservation)
+        result = execute(args.plan, args.parallel, args.retries, args.test, reservation=args.reservation)
     else:
-        plan=json.loads(args.plan.read_text(encoding='utf-8'))
-        result=execute(plan,args.parallel,args.retries,args.test)
-    print(json.dumps(result,ensure_ascii=False,indent=2))
-    if any(x!='approved' for x in result.values()):
+        plan = json.loads(args.plan.read_text(encoding='utf-8'))
+        result = execute(plan, args.parallel, args.retries, args.test)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if any(x != 'approved' for x in result.values()):
         sys.exit(1)
 
-if __name__=='__main__':
+
+if __name__ == '__main__':
     try:
         main()
     except RunCancelled as error:

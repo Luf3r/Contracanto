@@ -1,13 +1,14 @@
 """Windows process cleanup must not depend on taskkill's racy exit status."""
-import os
+
 import concurrent.futures
 import json
-from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import orchestrator as o
@@ -17,6 +18,7 @@ import orchestrator as o
 class WindowsProcessTests(unittest.TestCase):
     def test_extra_suspend_is_left_for_its_owner_to_release(self):
         import windows_job as w
+
         resume = w.win32process.ResumeThread
         counts = []
 
@@ -38,11 +40,10 @@ class WindowsProcessTests(unittest.TestCase):
     def assert_tree_stopped(self, parent_exits=False, taskkill_unavailable=False):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             marker = Path(directory).resolve() / 'late.txt'
-            child = ('import time; from pathlib import Path; time.sleep(2); '
-                     f'Path({str(marker)!r}).write_text("late")')
-            parent = ('import subprocess,sys,time; '
-                      f'subprocess.Popen([sys.executable,"-c",{child!r}]); '
-                      + ('' if parent_exits else 'time.sleep(20)'))
+            child = f'import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).write_text("late")'
+            parent = f'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",{child!r}]); ' + (
+                '' if parent_exits else 'time.sleep(20)'
+            )
             original_run = subprocess.run
 
             def run(args, **kwargs):
@@ -70,6 +71,7 @@ class WindowsProcessTests(unittest.TestCase):
 
     def test_assignment_failure_never_runs_command(self):
         import windows_job as w
+
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             marker = Path(directory).resolve() / 'should-not-run.txt'
             code = f'from pathlib import Path; Path({str(marker)!r}).touch()'
@@ -107,12 +109,18 @@ class WindowsProcessTests(unittest.TestCase):
 
     def test_unconfirmed_job_termination_preserves_reservation(self):
         import windows_job as w
+
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             store = Path(directory)
-            with patch.object(o, 'STORE', store), \
-                    patch.object(o, '_execute', side_effect=lambda *args: o.cmd(
-                        [sys.executable, '-c', 'import time; time.sleep(20)'], timeout=0.3)), \
-                    patch.object(w.win32job, 'TerminateJobObject', side_effect=OSError('termination denied')):
+            with (
+                patch.object(o, 'STORE', store),
+                patch.object(
+                    o,
+                    '_execute',
+                    side_effect=lambda *args: o.cmd([sys.executable, '-c', 'import time; time.sleep(20)'], timeout=0.3),
+                ),
+                patch.object(w.win32job, 'TerminateJobObject', side_effect=OSError('termination denied')),
+            ):
                 with self.assertRaises(o.RecoveryRequired):
                     o.execute({}, 1, 0, ['test'])
                 self.assertTrue((store / 'run.lock').exists())
@@ -120,12 +128,11 @@ class WindowsProcessTests(unittest.TestCase):
 
     def test_failed_termination_closes_job_before_waiting_for_child_pipes(self):
         import windows_job as w
+
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             marker = Path(directory).resolve() / 'late.txt'
-            child = ('import time; from pathlib import Path; time.sleep(2); '
-                     f'Path({str(marker)!r}).touch()')
-            parent = ('import subprocess,sys,time; '
-                      f'subprocess.Popen([sys.executable,"-c",{child!r}]); time.sleep(20)')
+            child = f'import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).touch()'
+            parent = f'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",{child!r}]); time.sleep(20)'
             with patch.object(w.win32job, 'TerminateJobObject', side_effect=OSError('termination denied')):
                 with self.assertRaises(o.RecoveryRequired):
                     o.cmd([sys.executable, '-c', parent], timeout=0.6)
@@ -146,11 +153,12 @@ class WindowsProcessTests(unittest.TestCase):
     def test_success_cleans_up_detached_descendant(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             marker = Path(directory).resolve() / 'late.txt'
-            child = ('import time; from pathlib import Path; time.sleep(2); '
-                     f'Path({str(marker)!r}).touch()')
-            parent = ('import subprocess,sys; '
-                      f'subprocess.Popen([sys.executable,"-c",{child!r}], '
-                      'stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)')
+            child = f'import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).touch()'
+            parent = (
+                'import subprocess,sys; '
+                f'subprocess.Popen([sys.executable,"-c",{child!r}], '
+                'stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)'
+            )
             result = o.cmd([sys.executable, '-c', parent])
             time.sleep(2.1)
             self.assertEqual(result.returncode, 0)

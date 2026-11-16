@@ -1,7 +1,8 @@
 """Contain a suspended Windows subprocess and its descendants in a Job Object."""
+
 import ctypes
-from ctypes import wintypes
 import time
+from ctypes import wintypes
 
 import win32api
 import win32con
@@ -10,10 +11,15 @@ import win32process
 
 
 class _ThreadEntry(ctypes.Structure):
-    _fields_ = [('dwSize', wintypes.DWORD), ('cntUsage', wintypes.DWORD),
-                ('th32ThreadID', wintypes.DWORD), ('th32OwnerProcessID', wintypes.DWORD),
-                ('tpBasePri', wintypes.LONG), ('tpDeltaPri', wintypes.LONG),
-                ('dwFlags', wintypes.DWORD)]
+    _fields_ = [
+        ('dwSize', wintypes.DWORD),
+        ('cntUsage', wintypes.DWORD),
+        ('th32ThreadID', wintypes.DWORD),
+        ('th32OwnerProcessID', wintypes.DWORD),
+        ('tpBasePri', wintypes.LONG),
+        ('tpDeltaPri', wintypes.LONG),
+        ('dwFlags', wintypes.DWORD),
+    ]
 
 
 _kernel = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -65,19 +71,16 @@ class WindowsJob:
     def __enter__(self):
         self.handle = win32job.CreateJobObject(None, '')
         try:
-            limits = win32job.QueryInformationJobObject(
-                self.handle, win32job.JobObjectExtendedLimitInformation)
+            limits = win32job.QueryInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation)
             limits['BasicLimitInformation']['LimitFlags'] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            win32job.SetInformationJobObject(
-                self.handle, win32job.JobObjectExtendedLimitInformation, limits)
+            win32job.SetInformationJobObject(self.handle, win32job.JobObjectExtendedLimitInformation, limits)
         except BaseException:
             self.handle.Close()
             raise
         return self
 
     def start(self, pid):
-        process = win32api.OpenProcess(
-            win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, pid)
+        process = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, pid)
         try:
             win32job.AssignProcessToJobObject(self.handle, process)
             # No child can be spawned before containment has been established.
@@ -88,8 +91,9 @@ class WindowsJob:
     def terminate(self, timeout=30):
         win32job.TerminateJobObject(self.handle, 1)
         deadline = time.monotonic() + timeout
-        while win32job.QueryInformationJobObject(
-                self.handle, win32job.JobObjectBasicAccountingInformation)['ActiveProcesses']:
+        while win32job.QueryInformationJobObject(self.handle, win32job.JobObjectBasicAccountingInformation)[
+            'ActiveProcesses'
+        ]:
             if time.monotonic() >= deadline:
                 raise TimeoutError('O Job Object ainda contém processos ativos')
             time.sleep(0.01)

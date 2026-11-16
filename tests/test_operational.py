@@ -1,13 +1,14 @@
 """Regressões operacionais; nenhum teste chama modelos pagos."""
-import json
+
 import concurrent.futures
+import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import orchestrator as o
@@ -19,11 +20,16 @@ def task(files):
 
 class OperationalTests(unittest.TestCase):
     def test_interrupted_worker_collection_preserves_uncertain_recovery(self):
-        for failure, collected in ((o.RecoveryRequired('process alive'), False),
-                                   (o.RecoveryRequired('process alive'), True),
-                                   (RuntimeError('known failure'), False),
-                                   (None, False)):
-            with self.subTest(failure=failure, collected=collected), tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        for failure, collected in (
+            (o.RecoveryRequired('process alive'), False),
+            (o.RecoveryRequired('process alive'), True),
+            (RuntimeError('known failure'), False),
+            (None, False),
+        ):
+            with (
+                self.subTest(failure=failure, collected=collected),
+                tempfile.TemporaryDirectory(dir=o.STORE) as directory,
+            ):
                 store = Path(directory)
                 current = task(['a'])
                 artifact = dict(task=current, commit='commit', worktree='.', report='done')
@@ -37,11 +43,14 @@ class OperationalTests(unittest.TestCase):
                 def git(*args, **kwargs):
                     return subprocess.CompletedProcess(args, 0, 'base' if args[0] == 'rev-parse' else '', '')
 
-                with patch.object(o, 'STORE', store), patch.object(o, 'git', side_effect=git), \
-                        patch.object(o.shutil, 'which', return_value='tool'), \
-                        patch.object(o, 'run_executor', side_effect=failure, return_value=artifact), \
-                        patch.object(o.concurrent.futures, 'as_completed', side_effect=interrupted), \
-                        patch.object(o, 'review') as review:
+                with (
+                    patch.object(o, 'STORE', store),
+                    patch.object(o, 'git', side_effect=git),
+                    patch.object(o.shutil, 'which', return_value='tool'),
+                    patch.object(o, 'run_executor', side_effect=failure, return_value=artifact),
+                    patch.object(o.concurrent.futures, 'as_completed', side_effect=interrupted),
+                    patch.object(o, 'review') as review,
+                ):
                     uncertain = isinstance(failure, o.RecoveryRequired)
                     try:
                         with self.assertRaises(o.RecoveryRequired if uncertain else KeyboardInterrupt):
@@ -62,7 +71,10 @@ class OperationalTests(unittest.TestCase):
     def test_uncertain_process_cleanup_preserves_reservation(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             store = Path(directory)
-            with patch.object(o, 'STORE', store), patch.object(o, '_execute', side_effect=o.RecoveryRequired('process alive')):
+            with (
+                patch.object(o, 'STORE', store),
+                patch.object(o, '_execute', side_effect=o.RecoveryRequired('process alive')),
+            ):
                 with self.assertRaises(o.RecoveryRequired):
                     o.execute(dict(tasks=[task(['a'])]), 1, 0, ['test'])
                 self.assertTrue((store / 'run.lock').exists())
@@ -94,23 +106,25 @@ class OperationalTests(unittest.TestCase):
 
     def test_large_unicode_input_roundtrip(self):
         payload = 'ação ' * 14000
-        result = o.cmd([sys.executable, '-c', 'import sys; sys.stdout.write(sys.stdin.read())'],
-                       input_text=payload)
+        result = o.cmd([sys.executable, '-c', 'import sys; sys.stdout.write(sys.stdin.read())'], input_text=payload)
         self.assertEqual(result.stdout, payload)
 
     def test_review_sends_full_patch_through_stdin(self):
         patch_text = '+hello\n' * 12000
+
         def command(args, **kw):
             if args[0] == 'claude':
                 self.assertLess(len(subprocess.list2cmdline(args)), 2000)
                 self.assertIn(patch_text, json.loads(kw['input_text'].split('\n', 1)[1])['patch'])
                 return subprocess.CompletedProcess(args, 0, json.dumps(dict(result='APPROVED')), '')
             return subprocess.CompletedProcess(args, 0, '', '')
+
         def git(*args, **kwargs):
             output = patch_text if args[0] == 'show' else ('commit' if args[0] == 'rev-parse' else '')
             if '--binary' in args:
                 output = output.encode()
             return subprocess.CompletedProcess(args, 0, output, '')
+
         with patch.object(o, 'cmd', side_effect=command), patch.object(o, 'git', side_effect=git):
             self.assertTrue(o.review(task(['a']), dict(worktree='.', report='done'), ['test'])[0])
 
@@ -128,8 +142,13 @@ class OperationalTests(unittest.TestCase):
     def test_preflight_failure_discards_previous_run_results(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             store = Path(directory)
-            previous = dict(state='completed', run_id='old', statuses={'OLD': 'approved'},
-                            details={'OLD': {'commit': 'old-commit'}}, recovery_required=True)
+            previous = dict(
+                state='completed',
+                run_id='old',
+                statuses={'OLD': 'approved'},
+                details={'OLD': {'commit': 'old-commit'}},
+                recovery_required=True,
+            )
             (store / 'status.json').write_text(json.dumps(previous))
             with patch.object(o, 'STORE', store), patch.object(o.shutil, 'which', return_value=None):
                 with self.assertRaises(RuntimeError):
@@ -147,16 +166,21 @@ class OperationalTests(unittest.TestCase):
             with self.subTest(operation=operation), tempfile.TemporaryDirectory(dir=o.STORE) as directory:
                 store = Path(directory)
                 current = task(['a'])
+
                 def git(*args, **kwargs):
                     if args[0] == operation:
                         raise KeyboardInterrupt
                     return subprocess.CompletedProcess(args, 0, 'base' if args[0] == 'rev-parse' else '', '')
+
                 artifact = dict(task=current, commit='commit', worktree='.', report='done')
-                with patch.object(o, 'STORE', store), patch.object(o, 'git', side_effect=git), \
-                        patch.object(o.shutil, 'which', return_value='tool'), \
-                        patch.object(o, 'run_executor', return_value=artifact), \
-                        patch.object(o, 'review', return_value=(True, 'APPROVED', '')), \
-                        patch.object(o, 'cmd', side_effect=RuntimeError('integration failed')):
+                with (
+                    patch.object(o, 'STORE', store),
+                    patch.object(o, 'git', side_effect=git),
+                    patch.object(o.shutil, 'which', return_value='tool'),
+                    patch.object(o, 'run_executor', return_value=artifact),
+                    patch.object(o, 'review', return_value=(True, 'APPROVED', '')),
+                    patch.object(o, 'cmd', side_effect=RuntimeError('integration failed')),
+                ):
                     try:
                         o.execute(dict(tasks=[current]), 1, 0, ['test'])
                     except KeyboardInterrupt:
@@ -171,14 +195,17 @@ class OperationalTests(unittest.TestCase):
     def test_executor_accepts_spaces_unicode_and_rename(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             root = Path(directory)
+
             def git(*args):
                 return o.git(*args, cwd=root)
+
             git('init', '-b', 'main')
             (root / 'old.txt').write_text('baseline')
             git('add', '.')
             git('-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'baseline')
             git('mv', 'old.txt', 'ação com espaço.txt')
             original = o.cmd
+
             def command(args, **kw):
                 if args[0] == 'agy':
                     self.assertIn('--sandbox', args)
@@ -186,8 +213,11 @@ class OperationalTests(unittest.TestCase):
                     result = dict(status='SUCCESS', response='done')
                     return subprocess.CompletedProcess(args, 0, json.dumps(dict(event='result', result=result)), '')
                 return original(args, **kw)
+
             with patch.object(o, 'make_worktree', return_value=root), patch.object(o, 'cmd', side_effect=command):
-                artifact = o.run_executor(task(['old.txt', 'ação com espaço.txt']), git('rev-parse', 'HEAD').stdout.strip(), '')
+                artifact = o.run_executor(
+                    task(['old.txt', 'ação com espaço.txt']), git('rev-parse', 'HEAD').stdout.strip(), ''
+                )
             self.assertEqual(git('status', '--porcelain').stdout, '')
             self.assertEqual(artifact['commit'], git('rev-parse', 'HEAD').stdout.strip())
 
@@ -196,8 +226,17 @@ class OperationalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             o.git('init', cwd=root)
-            o.git('-c', 'user.name=Test', '-c', 'user.email=test@localhost',
-                  'commit', '--allow-empty', '-m', 'baseline', cwd=root)
+            o.git(
+                '-c',
+                'user.name=Test',
+                '-c',
+                'user.email=test@localhost',
+                'commit',
+                '--allow-empty',
+                '-m',
+                'baseline',
+                cwd=root,
+            )
             (root / r'src\outside').touch()
             with self.assertRaisesRegex(RuntimeError, 'fora do escopo'):
                 o.check_scope({'files': ['src'], 'id': 'A'}, root, 'HEAD')
@@ -207,8 +246,10 @@ class OperationalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / 'late'
             child = f'import time; from pathlib import Path; time.sleep(1); Path({str(marker)!r}).touch()'
-            parent = ('import subprocess as s, sys; '
-                      f's.Popen([sys.executable, "-c", {child!r}], stdin=s.DEVNULL, stdout=s.DEVNULL, stderr=s.DEVNULL)')
+            parent = (
+                'import subprocess as s, sys; '
+                f's.Popen([sys.executable, "-c", {child!r}], stdin=s.DEVNULL, stdout=s.DEVNULL, stderr=s.DEVNULL)'
+            )
             self.assertEqual(o.cmd([sys.executable, '-c', parent]).returncode, 0)
             time.sleep(1.2)
             self.assertFalse(marker.exists())
@@ -217,8 +258,16 @@ class OperationalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             root = Path(directory).resolve()
             marker = root / 'late.txt'
-            child = 'import time; from pathlib import Path; time.sleep(2); Path(' + repr(str(marker)) + ').write_text("late")'
-            parent = 'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",' + repr(child) + '],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); time.sleep(20)'
+            child = (
+                'import time; from pathlib import Path; time.sleep(2); Path('
+                + repr(str(marker))
+                + ').write_text("late")'
+            )
+            parent = (
+                'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",'
+                + repr(child)
+                + '],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); time.sleep(20)'
+            )
             with self.assertRaises(subprocess.TimeoutExpired):
                 o.cmd([sys.executable, '-c', parent], timeout=0.6)
             time.sleep(2.1)

@@ -1,19 +1,17 @@
-import json
 import concurrent.futures
-from pathlib import Path
+import json
 import subprocess
-import tempfile
 import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-import orchestrator as o
 import mcp_server as server
+import orchestrator as o
 
-
-PLAN = json.dumps({'tasks': [dict(id='A', description='Example', deps=[],
-                                 files=['A.txt'], acceptance=['Tests pass'])]})
+PLAN = json.dumps({'tasks': [dict(id='A', description='Example', deps=[], files=['A.txt'], acceptance=['Tests pass'])]})
 
 
 class SubmissionTests(unittest.TestCase):
@@ -32,8 +30,11 @@ class SubmissionTests(unittest.TestCase):
             self.assertIn('falha de execução', report)
 
     def test_stop_before_worker_claim_and_stale_request(self):
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory, \
-                patch.object(o, 'STORE', Path(directory)), patch.object(server, 'STORE', Path(directory)):
+        with (
+            tempfile.TemporaryDirectory(dir=o.STORE) as directory,
+            patch.object(o, 'STORE', Path(directory)),
+            patch.object(server, 'STORE', Path(directory)),
+        ):
             self.assertIn('Nenhuma execução', server.stop_run())
             token = o.reserve_run()
             run_id = o.reservation_id(token)
@@ -53,15 +54,19 @@ class SubmissionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             store = Path(directory)
             started = store / 'started'
+
             def worker(*args):
                 program = 'import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); time.sleep(30)'
                 return o.cmd([sys.executable, '-c', program, str(started)], timeout=15, cancellable=True)
 
-            with patch.object(o, 'STORE', store), patch.object(server, 'STORE', store), \
-                    patch.object(o.shutil, 'which', return_value='tool'), \
-                    patch.object(o, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')), \
-                    patch.object(o, 'run_executor', side_effect=worker), \
-                    concurrent.futures.ThreadPoolExecutor(1) as pool:
+            with (
+                patch.object(o, 'STORE', store),
+                patch.object(server, 'STORE', store),
+                patch.object(o.shutil, 'which', return_value='tool'),
+                patch.object(o, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')),
+                patch.object(o, 'run_executor', side_effect=worker),
+                concurrent.futures.ThreadPoolExecutor(1) as pool,
+            ):
                 run = pool.submit(o.execute, json.loads(PLAN), 1, 0, ['test'])
                 deadline = time.monotonic() + 5
                 while not started.exists() and time.monotonic() < deadline and not run.done():
@@ -80,8 +85,9 @@ class SubmissionTests(unittest.TestCase):
             store = Path(directory)
             token = 'previous-worker-credential'
             (store / 'run.lock').write_text(json.dumps({'pid': 123, 'token': token}))
-            (store / 'status.json').write_text(json.dumps({'state': 'failed', 'run_id': token,
-                                                          'recovery_required': True}))
+            (store / 'status.json').write_text(
+                json.dumps({'state': 'failed', 'run_id': token, 'recovery_required': True})
+            )
             with patch.object(server, 'STORE', store):
                 status = server.get_run_status()
             self.assertNotIn(token, status)
@@ -93,8 +99,11 @@ class SubmissionTests(unittest.TestCase):
             store = Path(directory)
             source = store / 'submitted-plan.json'
             missing = store / 'missing.json'
-            with patch.object(o, 'STORE', store), patch.object(server, 'STORE', store), \
-                    patch.object(server.subprocess, 'Popen') as launch:
+            with (
+                patch.object(o, 'STORE', store),
+                patch.object(server, 'STORE', store),
+                patch.object(server.subprocess, 'Popen') as launch,
+            ):
                 server.submit_plan(PLAN, test_command_json='["test"]')
                 argv = launch.call_args.args[0][1:]
                 credential = argv[argv.index('--reservation') + 1]
@@ -184,9 +193,12 @@ class SubmissionTests(unittest.TestCase):
                         raise PermissionError('pid file locked')
                     return original_write(path, *args, **kwargs)
 
-                with patch.object(o, 'STORE', store), patch.object(server, 'STORE', store), \
-                        patch.object(server.subprocess, 'Popen') as launch, \
-                        patch.object(Path, 'write_text', denied_pid_write):
+                with (
+                    patch.object(o, 'STORE', store),
+                    patch.object(server, 'STORE', store),
+                    patch.object(server.subprocess, 'Popen') as launch,
+                    patch.object(Path, 'write_text', denied_pid_write),
+                ):
                     launch.return_value.pid = 123
                     try:
                         result = server.submit_plan(PLAN, test_command_json='["test"]')
@@ -210,9 +222,12 @@ class SubmissionTests(unittest.TestCase):
                 plan = dict(json.loads(PLAN), goal='Novo objetivo: documentação')
                 source = store / 'cli-plan.json'
                 source.write_text(json.dumps(plan), encoding='utf-8')
-                with patch.object(o, 'STORE', store), patch.object(server, 'STORE', store), \
-                        patch.object(o.shutil, 'which', return_value=None), \
-                        patch.object(sys, 'argv', ['orchestrator.py', str(source), '--test', 'test']):
+                with (
+                    patch.object(o, 'STORE', store),
+                    patch.object(server, 'STORE', store),
+                    patch.object(o.shutil, 'which', return_value=None),
+                    patch.object(sys, 'argv', ['orchestrator.py', str(source), '--test', 'test']),
+                ):
                     with self.assertRaisesRegex(RuntimeError, 'PATH'):
                         o.main()
                     self.assertTrue((store / 'submitted-plan.json').exists())
@@ -226,8 +241,11 @@ class SubmissionTests(unittest.TestCase):
             (store / 'submitted-plan.json').write_text(PLAN, encoding='utf-8')
             source = store / 'cli-plan.json'
             source.write_text(PLAN.replace('Example', 'New plan'), encoding='utf-8')
-            with patch.object(o, 'STORE', store), patch.object(server, 'STORE', store), \
-                    patch.object(sys, 'argv', ['orchestrator.py', str(source), '--test', 'test']):
+            with (
+                patch.object(o, 'STORE', store),
+                patch.object(server, 'STORE', store),
+                patch.object(sys, 'argv', ['orchestrator.py', str(source), '--test', 'test']),
+            ):
                 o.reserve_run()
                 reservation = (store / 'run.lock').read_bytes()
                 with self.assertRaisesRegex(RuntimeError, 'reservada'):
@@ -238,10 +256,16 @@ class SubmissionTests(unittest.TestCase):
     def test_second_submission_cannot_overwrite_first(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             store = Path(directory)
-            with patch.object(o, 'STORE', store), patch.object(server, 'STORE', store), patch.object(server.subprocess, 'Popen') as launch:
+            with (
+                patch.object(o, 'STORE', store),
+                patch.object(server, 'STORE', store),
+                patch.object(server.subprocess, 'Popen') as launch,
+            ):
                 launch.return_value.pid = 123
                 first = server.submit_plan(PLAN, test_command_json='["python", "-m", "unittest"]')
-                second = server.submit_plan(PLAN.replace('Example', 'Second'), test_command_json='["python", "-m", "unittest"]')
+                second = server.submit_plan(
+                    PLAN.replace('Example', 'Second'), test_command_json='["python", "-m", "unittest"]'
+                )
                 self.assertIn('PID', first)
                 self.assertIn('execução', second.lower())
                 self.assertEqual(launch.call_count, 1)
@@ -250,7 +274,11 @@ class SubmissionTests(unittest.TestCase):
     def test_failed_launch_releases_reservation(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             store = Path(directory)
-            with patch.object(o, 'STORE', store), patch.object(server, 'STORE', store), patch.object(server.subprocess, 'Popen', side_effect=OSError('launch failed')):
+            with (
+                patch.object(o, 'STORE', store),
+                patch.object(server, 'STORE', store),
+                patch.object(server.subprocess, 'Popen', side_effect=OSError('launch failed')),
+            ):
                 with self.assertRaises(OSError):
                     server.submit_plan(PLAN, test_command_json='["test"]')
                 self.assertFalse((store / 'run.lock').exists())
@@ -268,8 +296,11 @@ class SubmissionTests(unittest.TestCase):
                         raise PermissionError('status unavailable')
                     o.write_json(path, value)
 
-                with patch.object(o, 'STORE', store), patch.object(server, 'STORE', store), \
-                        patch.object(server.subprocess, 'Popen') as launch:
+                with (
+                    patch.object(o, 'STORE', store),
+                    patch.object(server, 'STORE', store),
+                    patch.object(server.subprocess, 'Popen') as launch,
+                ):
                     launch.side_effect = OSError('launch failed')
                     with patch.object(server, 'write_json', side_effect=write):
                         with self.assertRaisesRegex(PermissionError, 'status unavailable'):

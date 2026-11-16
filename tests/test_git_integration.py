@@ -1,10 +1,11 @@
 """Git real; somente os CLIs pagos e o resultado dos testes são substituídos."""
+
 import contextlib
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import orchestrator as o
@@ -23,9 +24,12 @@ class GitIntegrationTests(unittest.TestCase):
     def assert_integration_failure_restores_tree(self, error):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             root = Path(directory)
+
             def git(*args, cwd=None, check=True):
-                return subprocess.run(['git', *args], cwd=cwd or root, check=check,
-                                      capture_output=True, text=True, encoding='utf-8')
+                return subprocess.run(
+                    ['git', *args], cwd=cwd or root, check=check, capture_output=True, text=True, encoding='utf-8'
+                )
+
             git('init', '-b', 'main')
             git('config', 'user.name', 'Test')
             git('config', 'user.email', 'test@localhost')
@@ -35,13 +39,17 @@ class GitIntegrationTests(unittest.TestCase):
             store = root / '.agent-runs'
             store.mkdir()
             before = git('rev-parse', 'HEAD^{tree}').stdout.strip()
+
             def executor(task, base, context):
                 wt = root / '.agent-runs' / 'worker'
                 git('worktree', 'add', '-b', 'worker', str(wt), base)
                 (wt / 'feature.txt').write_text('change')
                 git('add', 'feature.txt', cwd=wt)
                 git('commit', '-m', 'feature', cwd=wt)
-                return dict(task=task, commit=git('rev-parse', 'HEAD', cwd=wt).stdout.strip(), worktree=str(wt), report='done')
+                return dict(
+                    task=task, commit=git('rev-parse', 'HEAD', cwd=wt).stdout.strip(), worktree=str(wt), report='done'
+                )
+
             with contextlib.ExitStack() as stack:
                 stack.enter_context(patch.object(o, 'ROOT', root))
                 stack.enter_context(patch.object(o, 'STORE', store))
@@ -50,7 +58,9 @@ class GitIntegrationTests(unittest.TestCase):
                 stack.enter_context(patch.object(o, 'run_executor', side_effect=executor))
                 stack.enter_context(patch.object(o, 'review', return_value=(True, 'APPROVED', '')))
                 stack.enter_context(patch.object(o, 'cmd', side_effect=error))
-                plan = {'tasks': [dict(id='A', description='Change', deps=[], files=['feature.txt'], acceptance=['Pass'])]}
+                plan = {
+                    'tasks': [dict(id='A', description='Change', deps=[], files=['feature.txt'], acceptance=['Pass'])]
+                }
                 if isinstance(error, (KeyboardInterrupt, o.RunCancelled)):
                     with self.assertRaises(type(error)):
                         o.execute(plan, 1, 0, ['test'])

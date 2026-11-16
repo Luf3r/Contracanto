@@ -1,10 +1,11 @@
 """State persistence must not discard recovery or fail on brief Windows readers."""
+
 import json
 import os
-from pathlib import Path
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import orchestrator as o
@@ -16,8 +17,16 @@ class StatePersistenceTests(unittest.TestCase):
             store = Path(directory)
             path = store / 'status.json'
             write = o.write_json
-            write(path, dict(state='failed', run_id='old', statuses={'OLD': 'approved'},
-                             details={'OLD': {'review': 'old review'}}, recovery_required=True))
+            write(
+                path,
+                dict(
+                    state='failed',
+                    run_id='old',
+                    statuses={'OLD': 'approved'},
+                    details={'OLD': {'review': 'old review'}},
+                    recovery_required=True,
+                ),
+            )
 
             def fail_starting(path, value):
                 if value.get('state') == 'starting':
@@ -60,11 +69,13 @@ class StatePersistenceTests(unittest.TestCase):
                 return original_replace(source, target)
 
             def execute(*args):
-                o.write_json(store / 'status.json', {
-                    'statuses': {'A': 'failed'}, 'recovery_required': True})
+                o.write_json(store / 'status.json', {'statuses': {'A': 'failed'}, 'recovery_required': True})
 
-            with patch.object(o, 'STORE', store), patch.object(o, '_execute', side_effect=execute), \
-                    patch.object(Path, 'replace', replace):
+            with (
+                patch.object(o, 'STORE', store),
+                patch.object(o, '_execute', side_effect=execute),
+                patch.object(Path, 'replace', replace),
+            ):
                 with self.assertRaises(o.RecoveryRequired):
                     o.execute({}, 1, 0, ['test'])
                 self.assertTrue((store / 'run.lock').exists())
@@ -79,8 +90,7 @@ class StatePersistenceTests(unittest.TestCase):
                 failed = False
 
                 def execute(*args):
-                    original_write(store / 'status.json', {
-                        'statuses': {'A': 'failed'}, 'recovery_required': True})
+                    original_write(store / 'status.json', {'statuses': {'A': 'failed'}, 'recovery_required': True})
                     return {'A': 'failed'}
 
                 def write(path, data):
@@ -90,8 +100,11 @@ class StatePersistenceTests(unittest.TestCase):
                         raise PermissionError('status locked')
                     original_write(path, data)
 
-                with patch.object(o, 'STORE', store), patch.object(o, '_execute', side_effect=execute), \
-                        patch.object(o, 'write_json', side_effect=write):
+                with (
+                    patch.object(o, 'STORE', store),
+                    patch.object(o, '_execute', side_effect=execute),
+                    patch.object(o, 'write_json', side_effect=write),
+                ):
                     with self.assertRaises(PermissionError):
                         o.execute({}, 1, 0, ['test'])
                     self.assertTrue((store / 'run.lock').exists())
@@ -104,8 +117,7 @@ class StatePersistenceTests(unittest.TestCase):
             store = Path(directory)
 
             def execute(*args):
-                o.write_json(store / 'status.json', {
-                    'statuses': {'A': 'failed'}, 'recovery_required': True})
+                o.write_json(store / 'status.json', {'statuses': {'A': 'failed'}, 'recovery_required': True})
                 raise OSError('subsequent storage failure')
 
             with patch.object(o, 'STORE', store), patch.object(o, '_execute', side_effect=execute):

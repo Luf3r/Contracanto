@@ -1,13 +1,14 @@
 """Recovery reservations survive interruptions and partial worker submission."""
+
 import concurrent.futures
 import contextlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import orchestrator as o
@@ -23,7 +24,9 @@ class RecoveryInterruptionTests(unittest.TestCase):
                     launch = stack.enter_context(patch.object(o.subprocess, 'Popen'))
                     process = launch.return_value
                     process.communicate.side_effect = [
-                        subprocess.TimeoutExpired(['test'], 1), KeyboardInterrupt('cleanup interrupted')]
+                        subprocess.TimeoutExpired(['test'], 1),
+                        KeyboardInterrupt('cleanup interrupted'),
+                    ]
                     if stage == 'kill':
                         process.kill.side_effect = KeyboardInterrupt('kill interrupted')
                     if os.name == 'nt':
@@ -77,12 +80,17 @@ class RecoveryInterruptionTests(unittest.TestCase):
                 def git(*args, **kwargs):
                     return subprocess.CompletedProcess(args, 0, 'base' if args[0] == 'rev-parse' else '', '')
 
-                tasks = [dict(id=tid, description='Example', deps=[], files=[tid + '.txt'],
-                              acceptance=['Pass']) for tid in ('A', 'B')]
-                with patch.object(o, 'STORE', store), patch.object(o, 'git', side_effect=git), \
-                        patch.object(o.shutil, 'which', return_value='tool'), \
-                        patch.object(o, 'run_executor', side_effect=worker), \
-                        patch.object(o.concurrent.futures, 'ThreadPoolExecutor', FailingPool):
+                tasks = [
+                    dict(id=tid, description='Example', deps=[], files=[tid + '.txt'], acceptance=['Pass'])
+                    for tid in ('A', 'B')
+                ]
+                with (
+                    patch.object(o, 'STORE', store),
+                    patch.object(o, 'git', side_effect=git),
+                    patch.object(o.shutil, 'which', return_value='tool'),
+                    patch.object(o, 'run_executor', side_effect=worker),
+                    patch.object(o.concurrent.futures, 'ThreadPoolExecutor', FailingPool),
+                ):
                     with self.assertRaises(RuntimeError):
                         o.execute({'tasks': tasks}, 2, 0, ['test'])
                     self.assertTrue(finished.is_set())

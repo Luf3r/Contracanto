@@ -1,6 +1,6 @@
 """Verificação do plano smoke; chamada explicitamente após sua implementação."""
-from pathlib import Path
 
+from pathlib import Path
 
 if __name__ == '__main__':
     content = Path('smoke.txt').read_text(encoding='utf-8')
