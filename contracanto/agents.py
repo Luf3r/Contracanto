@@ -63,17 +63,10 @@ def _verdict_object(response: str) -> dict | None:
 
 
 def parse_verdict(response: str) -> Verdict:
-    """Interpreta a resposta do revisor; na dúvida, rejeita.
-
-    O formato esperado é JSON. Uma resposta cuja primeira linha seja exatamente
-    APPROVED ou REJECTED, o formato anterior, também é aceita.
-    """
+    """Interpreta a resposta do revisor, um objeto JSON com `verdict`; na dúvida, rejeita."""
     response = response.strip()
     data = _verdict_object(response)
     if data is None:
-        first_line = response.splitlines()[0].strip() if response else ''
-        if first_line in VERDICTS:
-            return Verdict(first_line == 'APPROVED', response)
         return Verdict(False, 'REJECTED\nResposta do revisor sem veredito reconhecível:\n' + response)
     verdict = str(data.get('verdict', '')).strip().upper()
     if verdict not in VERDICTS:

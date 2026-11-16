@@ -18,7 +18,7 @@ from pathlib import Path
 engine=sys.argv[1]
 text=sys.stdin.read()
 if engine == 'claude':
-    print(json.dumps({'result':'APPROVED'}))
+    print(json.dumps({'result':json.dumps({'verdict':'APPROVED'})}))
 else:
     prompt=json.loads(text)['message']['content']
     data=json.loads(prompt.split('\\n',1)[1])

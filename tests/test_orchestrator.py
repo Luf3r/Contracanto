@@ -60,7 +60,9 @@ class RegressionTests(unittest.TestCase):
         def command(args, **kwargs):
             calls.append(args)
             if args[0] == 'claude':
-                return subprocess.CompletedProcess(args, 0, json.dumps({'result': 'APPROVED', 'is_error': False}), '')
+                return subprocess.CompletedProcess(
+                    args, 0, json.dumps({'result': '{"verdict": "APPROVED"}', 'is_error': False}), ''
+                )
             output = b'' if '--binary' in args else support.fake_git_output(args[1:], 'commit')
             return subprocess.CompletedProcess(args, 0, output, '')
 

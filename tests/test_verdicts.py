@@ -20,7 +20,8 @@ class VerdictTests(unittest.TestCase):
             ('{"verdict": "REJECTED", "problems": ["falta teste"]}', False),
             ('{"verdict": "TALVEZ"}', False),
             ('{"outro": 1} e depois {"verdict": "APPROVED"}', True),
-            ('APPROVED\nTudo certo', True),
+            # Só o objeto JSON vale: a palavra solta na primeira linha não aprova.
+            ('APPROVED\nTudo certo', False),
             ('REJECTED\nFalta teste', False),
             ('Aprovado, parece bom', False),
             ('', False),

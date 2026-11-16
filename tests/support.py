@@ -109,7 +109,8 @@ class RepositoryTestCase(unittest.TestCase):
                 if args[0] == 'claude':
                     calls['review'] += 1
                     verdict = 'REJECTED' if agent_commit == 2 and calls['review'] == 1 else 'APPROVED'
-                    return subprocess.CompletedProcess(args, 0, json.dumps({'result': verdict}), '')
+                    answer = json.dumps({'verdict': verdict})
+                    return subprocess.CompletedProcess(args, 0, json.dumps({'result': answer}), '')
                 if args[0] == sys.executable:
                     in_main = Path(kwargs['cwd']) == root
                     if mutate_tests == ('main' if in_main else 'worker'):
