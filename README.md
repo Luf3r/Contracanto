@@ -5,7 +5,7 @@ Claude planeja e revisa. Antigravity implementa cada tarefa em um worktree Git. 
 **Protótipo de integração local para Windows**, com regressões automatizadas e smoke local anterior. Cada máquina precisa validar suas credenciais e permissões. Não é solução de produção.
 
 ## Pré-requisitos
-- Windows, Python 3.13–3.15, Git for Windows. Ambiente local validado: Python 3.15.2, MCP 1.30.0, `agy` 1.5.8 e Claude Code 2.1.325. A matriz de CI está configurada para Python 3.13 e 3.15 em Windows e Linux; confira o resultado do workflow antes de adotar outra combinação.
+- Windows, Python 3.13–3.15 e Git for Windows com suporte a `git merge-tree --write-tree` para integrar tarefas paralelas. Ambiente local validado: Python 3.15.2, MCP 1.30.0, `agy` 1.5.8 e Claude Code 2.1.325. A matriz de CI está configurada para Python 3.13 e 3.15 em Windows e Linux; confira o resultado do workflow antes de adotar outra combinação.
 - Aplicativo Claude Desktop (aba Code, sessão **Local**)
 - Claude Code CLI instalado e autenticado (`claude --version`, `claude -p "oi"`)
 - Antigravity App e CLI (`agy --version`), com autenticação realizada interativamente
@@ -87,7 +87,7 @@ O plano é um objeto JSON com `tasks` (1 a 100 tarefas). `goal` é contexto desc
 
 Diretórios autorizam seus descendentes. Caminhos absolutos, `..`, `.`, `\\`, componentes vazios, `.git` e `.agent-runs` são rejeitados. A comparação de ownership é textual; use a grafia exata e consistente dos caminhos, inclusive maiúsculas/minúsculas. A verificação de escopo é posterior à execução e não é uma sandbox.
 
-No MCP, tanto o plano quanto o comando de teste são strings contendo JSON. Exemplo de argumentos de `submit_plan`:
+O MCP exige `plan_json` e `test_command_json`. Ambos são strings contendo JSON. Exemplo de argumentos de `submit_plan`:
 
 ```json
 {
@@ -98,13 +98,19 @@ No MCP, tanto o plano quanto o comando de teste são strings contendo JSON. Exem
 }
 ```
 
-O comando é uma lista de argumentos executada sem shell. Operadores como `&&`, pipes e redirecionamentos não são interpretados. `parallel` aceita 1 a 8; `retries`, 0 a 3 e controla correções após rejeição da revisão, não falhas de infraestrutura.
+Quem fornece `--test` ou `test_command_json` escolhe um comando local. O worker recebe uma lista não vazia de argumentos e inicia o executável diretamente. O comando e o código que ele carrega rodam fora do sandbox do Antigravity, com as permissões do usuário, inclusive acesso à rede, às credenciais e a arquivos fora do repositório. Podem fazer push ou deploy. Use apenas comandos, planos e código de origem confiável. A primeira execução ocorre no worktree antes do parecer do revisor. Cada nova revisão repete o teste, e a integração o executa novamente na branch de destino.
+
+`parallel` aceita 1 a 8. `retries` aceita 0 a 3 e controla as tentativas de correção após rejeição da revisão.
 
 Se os testes do worktree falharem, o executor recebe o parecer do revisor, o código de saída e o trecho final da saída dos testes na tentativa de correção. Se as tentativas se esgotarem, consulte o diagnóstico em `details.<id>.review` e o resumo em `details.<id>.error` no status da tarefa.
 
 O comando de testes deve preservar o commit atual, a branch ativa (ou o estado de HEAD destacado) e deixar o Git limpo. Trocar de branch mesmo mantendo o mesmo commit, alterar arquivos rastreados ou criar arquivos não ignorados impede a aprovação, mesmo com código de saída 0. Artefatos ignorados pelo Git, como caches, são permitidos. No worktree, a tarefa falha e as alterações ficam disponíveis para inspeção. Na branch de destino, mudanças de branch, alterações ou commits feitos pelos testes exigem recuperação manual: a reserva é mantida e nenhuma outra tarefa integra, inclusive se o comando falhar ou sofrer timeout. Não há limpeza destrutiva automática desses arquivos.
 
 Merge, cherry-pick, revert, rebase, `git am` e bisect em andamento também impedem a aprovação, inclusive quando `git status --porcelain` está vazio. Se os testes de integração deixarem uma dessas operações aberta na branch de destino, a reserva permanece ativa para recuperação manual.
+
+Para arquivos rastreados com `assume-unchanged` ou `skip-worktree`, o worker compara o conteúdo em disco com o HEAD usando um índice Git temporário. A verificação preserva as marcas do índice local e alcança os submódulos inicializados. Em um checkout parcial, o worker usa `git sparse-checkout check-rules` para reconhecer arquivos ausentes conforme as regras de seleção.
+
+A verificação de limpeza inclui submódulos inicializados mesmo quando configurados com `ignore = all`. Antes do cherry-pick, o worker verifica se a integração sobrescreveria dados locais não rastreados, inclusive arquivos ignorados. Uma colisão faz a tarefa falhar antes de alterar a branch. Se a colisão surgir no caminho de um revert após os testes, os dados ficam preservados e a reserva permanece ativa para recuperação manual.
 
 ## Conectar ao Claude Desktop na aba Code
 Edite o `.mcp.json` **na raiz do repositório**, usando o caminho absoluto do Python do venv e o caminho absoluto do servidor. Exemplo (substituir USUARIO e PROJETO):
@@ -132,8 +138,10 @@ Peça ao Claude na aba Code:
 - O Claude cria o grafo de tarefas e envia pelo MCP. A fila é executada por Python, chamando `agy` em worktrees locais isolados.
 - O Claude Code CLI revisa o patch usando o alias `sonnet`, sem ferramentas internas e sem carregar servidores MCP. O revisor recebe os diffs de texto e os patches binários no formato aplicável do Git. Para um critério que depende do conteúdo de uma imagem ou de outro binário, inclua um teste específico desse conteúdo. Prompts seguem por stdin para evitar o limite de argumentos do Windows. A aprovação exige o veredito `APPROVED` na primeira linha e testes aprovados.
 - Tarefas independentes, que não anunciam ownership conflitante, podem rodar em paralelo; a integração ocorre sequencialmente.
+- No pedido ao revisor, `patch_encoding` identifica a codificação usada para representar os bytes do patch. Codificar o campo `patch` com esse valor reproduz a saída original do Git, inclusive quebras de linha e acentos de arquivos legados.
 - Após cada implementação ou correção, o orquestrador confere a branch atribuída ao worktree e o commit esperado antes de registrar as mudanças. Uma troca de branch no mesmo commit também faz a tarefa falhar. O escopo é conferido pelo diff completo entre a base e o candidato antes de cada revisão, incluindo origem e destino de renomeações.
-- Falhas de cherry-pick param a tarefa. Não faz deploy, push ou exclusões automáticas de worktrees.
+- A integração termina na branch local. Uma falha de cherry-pick interrompe a tarefa e os worktrees ficam disponíveis para inspeção.
+- Antes do cherry-pick, o worker compara os caminhos da integração prevista com a lista `files` da tarefa. Se uma tarefa anterior moveu um diretório e o Git redirecionaria uma adição para fora do escopo, a integração é recusada. Depois do cherry-pick, o worker confere os caminhos do commit aplicado antes de executar os testes.
 - `get_run_status` precisa ser consultado; o aplicativo Claude não recebe notificação push de término.
 - Não há retomada após desligar o processo, limitação de custos/tokens, isolamento forte de execução ou fila transacional. Não use em repositórios reais até adicionar esses recursos.
 - Scripts usam revisão por modelo e não garantem correção ou segurança. Execute testes e auditoria adicionais antes de merge de produção.
@@ -157,9 +165,15 @@ O estado global final é `completed` quando todas as tarefas são aprovadas, `ca
 
 Os estados das tarefas são `pending`, `running`, `review`, `approved`, `failed`, `blocked` e `cancelled`. Uma falha bloqueia todos os descendentes. `approved` significa revisão aprovada, testes do worktree aprovados, cherry-pick aplicado e testes de integração aprovados.
 
+Em `details.<id>`, `commit` identifica o candidato do worktree e `target_before` identifica o HEAD de destino antes do cherry-pick. O worker salva `integrated_commit` assim que identifica o commit aplicado, antes dos testes. Se a integração exigir um revert, `revert_commit` identifica o commit que restaurou a árvore. Execuções de versões anteriores podem conter apenas `commit`.
+
+Se a gravação da aprovação falhar, a execução para e mantém a reserva. Quando o armazenamento volta a aceitar a escrita do diagnóstico, o status registra a tarefa aprovada, o SHA integrado e a necessidade de recuperação manual. Se o erro persistir, consulte o último status gravado e confira `integrated_commit` no histórico da branch antes de reenviar a tarefa.
+
 Worktrees ficam em `.agent-runs/runs/<identificador-da-execução>/wt-<id>`. Cada execução tem seu próprio diretório e branches únicas; IDs de tarefas podem ser reutilizados. Os worktrees são preservados para inspeção. CLI e MCP atualizam `submitted-plan.json` de forma atômica, sob a reserva de execução, antes da preparação dos workers. `get_submitted_plan()` retorna esse plano, inclusive se a preparação falhar. Uma execução recusada por reserva ativa não substitui o plano existente. `status.json` e o plano salvo mostram a execução mais recente; o log do MCP é sobrescrito a cada submissão MCP e não é atualizado pela CLI.
 
-Em timeout, o runner encerra e aguarda a árvore de subprocessos antes de retornar. No Windows, cria cada comando suspenso, associa-o a um Job Object exclusivo e só então libera sua execução. O encerramento usa a API do Windows e verifica que não há processos ativos no Job, mesmo se o pai já terminou; não depende de `taskkill`. Descendentes remanescentes também são encerrados quando um comando termina normalmente. Se a associação falhar, o comando é encerrado sem executar. O módulo `windows_job.py` deve acompanhar `orchestrator.py`; ele usa `pywin32`, já fixado nos arquivos de dependências. Em sistemas POSIX, o runner usa um grupo de processos dedicado. Se não puder confirmar o encerramento, bloqueia a integração, mantém a reserva e requer inspeção manual dos processos antes de liberar `run.lock`.
+No Windows, o runner cria cada comando suspenso, associa-o a um Job Object exclusivo e só então libera sua execução. Ao terminar, inclusive em timeout ou cancelamento, o runner encerra os descendentes e confirma que o Job ficou vazio. Se a associação falhar, o comando é encerrado ainda suspenso. O módulo `windows_job.py` deve acompanhar `orchestrator.py` e usa a dependência `pywin32`.
+
+Em POSIX, o runner cria um grupo de processos por comando. Ao término, envia `SIGKILL` aos membros restantes do grupo e aguarda seu encerramento. Um processo que criar outra sessão ou sair do grupo escapa desse controle. Se o encerramento do grupo ou do Job ficar incerto, o worker bloqueia a integração e mantém a reserva para inspeção manual.
 
 Durante a implementação paralela, `Ctrl+C` aguarda os workers e verifica seus resultados antes de liberar a reserva. Nenhuma tarefa desse lote integra após a interrupção. Se algum worker exigir recuperação manual, ou se a espera for novamente interrompida sem confirmar o término, a reserva permanece ativa com `recovery_required: true`.
 

@@ -12,6 +12,186 @@ import orchestrator as o
 
 
 class SafetyGateTests(unittest.TestCase):
+    def test_parallel_directory_rename_cannot_redirect_an_authorized_addition(self):
+        with self.repository() as (root, store, base, task, git):
+            git('config', 'merge.directoryRenames', 'true')
+            (root / 'old').mkdir()
+            (root / 'old/a.txt').write_text('seed')
+            git('add', 'old')
+            git('commit', '-m', 'directory to rename')
+            tasks = [dict(task, files=['old/a.txt', 'new/a.txt']),
+                     dict(task, id='B', files=['old/b.txt'])]
+
+            def agent(prompt, wt):
+                if wt.name == 'wt-A':
+                    (wt / 'old').rename(wt / 'new')
+                else:
+                    (wt / 'old/b.txt').write_text('added by B')
+                return 'done'
+
+            # Both workers start at the same commit. Integrate A first.
+            with patch.object(o, 'run_agy', side_effect=agent), \
+                    patch.object(o.concurrent.futures, 'as_completed', side_effect=iter):
+                states = o.execute({'tasks': tasks}, 2, 0, [sys.executable, '-c', 'pass'])
+            self.assertEqual(states, {'A': 'approved', 'B': 'failed'})
+            details = json.loads((store / 'status.json').read_text())['details']
+            self.assertIn('new/b.txt', details['B']['error'])
+            self.assertEqual(details['A']['integrated_commit'], git('rev-parse', 'HEAD').stdout.strip())
+            candidate = git('rev-parse', 'HEAD', cwd=details['A']['worktree']).stdout.strip()
+            self.assertEqual(details['A']['commit'], candidate)
+            self.assertNotEqual(details['A']['integrated_commit'], candidate)
+            self.assertFalse((root / 'new/b.txt').exists())
+            self.assertTrue((root / 'new/a.txt').is_file())
+
+    def test_failed_approval_write_preserves_integrated_sha_and_lock(self):
+        for persistent in (False, True):
+            with self.subTest(persistent=persistent), self.repository() as (root, store, base, task, git):
+                original_write = o.write_json
+                failed = False
+
+                def write(path, value):
+                    nonlocal failed
+                    if value.get('statuses', {}).get('A') == 'approved' and (persistent or not failed):
+                        failed = True
+                        raise OSError('approval write failed')
+                    original_write(path, value)
+
+                second = dict(task, id='B', files=['b.txt'])
+                with patch.object(o, 'write_json', side_effect=write), self.assertRaises((o.RecoveryRequired, OSError)):
+                    o.execute({'tasks': [task, second]}, 1, 0, [sys.executable, '-c', 'pass'])
+                self.assertTrue(failed)
+                self.assertTrue((store / 'run.lock').exists())
+                state = json.loads((store / 'status.json').read_text())
+                self.assertEqual(state['details']['A']['integrated_commit'], git('rev-parse', 'HEAD').stdout.strip())
+                if not persistent:
+                    self.assertTrue(state['recovery_required'])
+                    self.assertEqual(state['statuses'], {'A': 'approved', 'B': 'blocked'})
+                self.assertFalse((root / 'b.txt').exists())
+
+    def test_tests_cannot_hide_tracked_changes_with_index_flags(self):
+        for flag in ('--assume-unchanged', '--skip-worktree'):
+            with self.subTest(flag=flag), self.repository() as (root, store, base, task, git):
+                git('update-index', flag, 'outside.txt')
+                code = ("from pathlib import Path\n"
+                        "if Path('.agent-runs').is_dir(): Path('outside.txt').write_text('modified')")
+                states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
+                self.assertEqual(states, {'A': 'failed'})
+                self.assertEqual((root / 'outside.txt').read_text(), 'modified')
+                self.assertTrue((store / 'run.lock').exists())
+                self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                self.assertEqual(git('ls-files', '-v', 'outside.txt').stdout[0],
+                                 'h' if flag == '--assume-unchanged' else 'S')
+
+    def test_reviewer_receives_byte_exact_legacy_text_patch(self):
+        with self.repository() as (root, store, base, task, git):
+            (root / '.gitattributes').write_text('allowed.txt -text\n')
+            content = b'revis\xe3o \x80\r\n'
+            (root / 'allowed.txt').write_bytes(content)
+            git('add', 'allowed.txt', '.gitattributes')
+            git('commit', '-m', 'legacy text')
+            original_cmd = o.cmd
+            payload = {}
+
+            def command(args, **kwargs):
+                if args[0] == 'claude':
+                    payload.update(json.loads(kwargs['input_text'].split('\n', 1)[1]))
+                return original_cmd(args, **kwargs)
+
+            with patch.object(o, 'cmd', side_effect=command):
+                o.review(task, dict(worktree=str(root), report='done'), [sys.executable, '-c', 'pass'])
+            git('switch', '--detach', base)
+            subprocess.run(['git', 'apply', '-'], cwd=root, check=True, capture_output=True,
+                           input=payload['patch'].encode(payload['patch_encoding']))
+            self.assertEqual((root / 'allowed.txt').read_bytes(), content)
+
+    def test_sparse_checkout_accepts_excluded_files_and_detects_missing_selected_file(self):
+        with self.repository() as (root, store, base, task, git):
+            for directory in ('src', 'docs'):
+                (root / directory).mkdir()
+                (root / directory / 'entry').write_text(directory)
+            git('add', 'src', 'docs')
+            git('commit', '-m', 'sparse fixture')
+            git('sparse-checkout', 'set', '--cone', 'src')
+            self.assertFalse((root / 'docs/entry').exists())
+            self.assertEqual(o.changed_files(root), [])
+            git('update-index', '--skip-worktree', 'src/entry')
+            (root / 'src/entry').unlink()
+            self.assertIn('src/entry', o.changed_files(root))
+
+    def test_ignored_local_data_survives_integration(self):
+        for layout in ('file', 'directory', 'parent', 'nested_repo'):
+            with self.subTest(layout=layout), self.repository() as (root, store, base, task, git):
+                (root / '.gitignore').write_text('.agent-runs/\ncache.local\n')
+                git('add', '.gitignore')
+                git('commit', '-m', 'Ignore local cache')
+                before = git('rev-parse', 'HEAD').stdout
+                local = root / 'cache.local'
+                if layout in ('directory', 'nested_repo'):
+                    local.mkdir()
+                    if layout == 'nested_repo':
+                        git('init', cwd=local)
+                    local = local / 'private'
+                local.write_bytes(b'local data')
+                task['files'] = ['.gitignore', 'cache.local']
+
+                def agent(prompt, wt):
+                    (wt / '.gitignore').write_text('.agent-runs/\n')
+                    destination = wt / 'cache.local'
+                    if layout in ('parent', 'nested_repo'):
+                        destination.mkdir()
+                        destination = destination / ('private' if layout == 'nested_repo' else 'new')
+                    destination.write_text('candidate')
+                    return 'done'
+
+                with patch.object(o, 'run_agy', side_effect=agent):
+                    result = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+                self.assertEqual(result, {'A': 'failed'})
+                self.assertEqual(local.read_bytes(), b'local data')
+                self.assertEqual(git('rev-parse', 'HEAD').stdout, before)
+                self.assertFalse((store / 'run.lock').exists())
+
+    def test_revert_preserves_ignored_file_created_by_integration_tests(self):
+        with self.repository() as (root, store, base, task, git):
+            (root / '.gitignore').write_text('.agent-runs/\noutside.txt\n')
+            git('add', '.gitignore')
+            git('commit', '-m', 'Ignore untracked copies')
+            task['files'] = ['outside.txt']
+
+            def agent(prompt, wt):
+                (wt / 'outside.txt').unlink()
+                return 'deleted tracked file'
+
+            code = ("from pathlib import Path\n"
+                    "if Path('.agent-runs').is_dir():\n"
+                    " Path('outside.txt').write_bytes(b'local diagnostic')\n"
+                    " raise SystemExit(1)")
+            with patch.object(o, 'run_agy', side_effect=agent):
+                result = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
+            self.assertEqual(result, {'A': 'failed'})
+            self.assertEqual((root / 'outside.txt').read_bytes(), b'local diagnostic')
+            self.assertTrue((store / 'run.lock').exists())
+            self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+
+    def test_integration_detects_dirty_submodule_with_ignore_all(self):
+        with self.repository() as (root, store, base, task, git):
+            vendor = root / 'vendor'
+            vendor.mkdir()
+            git('init', cwd=vendor)
+            (vendor / 'outside.txt').write_text('original')
+            git('add', '.', cwd=vendor)
+            git('-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'initial', cwd=vendor)
+            git('config', '-f', '.gitmodules', 'submodule.vendor.path', 'vendor')
+            git('config', '-f', '.gitmodules', 'submodule.vendor.url', './vendor')
+            git('config', '-f', '.gitmodules', 'submodule.vendor.ignore', 'all')
+            git('add', '.gitmodules', 'vendor')
+            git('commit', '-m', 'Register submodule')
+            code = "from pathlib import Path; p = Path('vendor/outside.txt'); p.exists() and p.write_text('dirty')"
+            result = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
+            self.assertEqual(result, {'A': 'failed'})
+            self.assertEqual((vendor / 'outside.txt').read_text(), 'dirty')
+            self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+            self.assertTrue((store / 'run.lock').exists())
+
     def test_interrupt_after_successful_pick_keeps_unverified_commit_reserved(self):
         with self.repository() as (root, store, base, task, git):
             class InterruptedResult:
@@ -79,8 +259,9 @@ class SafetyGateTests(unittest.TestCase):
             root = Path(directory).resolve()
             original_cmd = o.cmd
 
-            def git(*args, cwd=None, check=True):
-                return original_cmd(['git', *args], cwd=cwd or root, check=check)
+            original_git = o.git
+            def git(*args, cwd=None, **kwargs):
+                return original_git(*args, cwd=cwd or root, **kwargs)
 
             git('init', '-b', 'main')
             git('config', 'user.name', 'Test')

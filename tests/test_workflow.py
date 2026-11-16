@@ -39,8 +39,9 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
             root = Path(directory)
             original_cmd = o.cmd
-            def git(*args, cwd=None, check=True):
-                return original_cmd(['git', *args], cwd=cwd or root, check=check)
+            original_git = o.git
+            def git(*args, cwd=None, **kwargs):
+                return original_git(*args, cwd=cwd or root, **kwargs)
             git('init', '-b', 'main')
             git('config', 'user.name', 'Test')
             git('config', 'user.email', 'test@localhost')

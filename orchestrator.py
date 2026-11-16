@@ -1,5 +1,5 @@
 """MVP local de orquestração Claude -> Antigravity, para um repositório Git confiável.
-Sem deploy/push e sem bypass de permissões. Requer CLI `agy` e `claude` autenticados.
+Executa o comando de testes com as permissões locais do worker. Requer CLIs autenticados.
 """
 from __future__ import annotations
 import argparse
@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,12 @@ STOP_FILE = None
 
 class RecoveryRequired(RuntimeError):
     """Estado Git/processos incerto; nenhuma outra tarefa deve integrar."""
+
+
+class IntegrationStateError(RecoveryRequired):
+    def __init__(self, state, error):
+        super().__init__(f'Falha ao registrar a integração: {error}')
+        self.state = state
 
 
 class RunCancelled(RuntimeError):
@@ -109,10 +116,31 @@ def retry_permission_error(operation, *args):
             time.sleep(0.05)
 
 
-def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=False):
+def kill_posix_group(pid):
+    # communicate() may already have reaped the leader.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pid, signal.SIGKILL)
+
+
+def wait_posix_group(pid):
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise RecoveryRequired('Encerramento do grupo de processos não confirmado')
+        time.sleep(0.02)
+
+
+def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=False,
+        raw_paths=False, binary_output=False, env_overrides=None):
     options = ({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW | WindowsJob.creationflags}
                if os.name == 'nt' else {'start_new_session': True})
     env = dict(os.environ, PYTHONIOENCODING='utf-8')
+    if env_overrides:
+        env.update(env_overrides)
     # Close the job before Popen's pipe cleanup: surviving children may still
     # hold those pipes open if explicit termination failed.
     with contextlib.ExitStack() as processes, (WindowsJob() if os.name == 'nt' else contextlib.nullcontext()) as job:
@@ -130,9 +158,13 @@ def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=F
                 stdin.seek(0)
                 input_text = None
         try:
+            # NUL-delimited Git paths must not undergo universal newline translation
+            # or lossy decoding before the ownership and checkout checks.
+            raw = raw_paths or binary_output
             process = subprocess.Popen(args, cwd=str(cwd), stdin=stdin,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                       encoding='utf-8', errors='replace', env=env, **options)
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       encoding=None if raw else 'utf-8',
+                                       errors=None if raw else 'replace', env=env, **options)
             processes.enter_context(process)
             if job is not None:
                 job.start(process.pid)
@@ -152,6 +184,9 @@ def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=F
                 stdout, stderr = process.communicate(input_text, timeout=timeout)
             if job is not None:
                 job.terminate()
+            else:
+                kill_posix_group(process.pid)
+                wait_posix_group(process.pid)
         except (Exception, KeyboardInterrupt) as error:
             if process is None:
                 if isinstance(error, KeyboardInterrupt):
@@ -164,8 +199,10 @@ def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=F
                     if process.poll() is None:
                         process.kill()
                 else:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    kill_posix_group(process.pid)
                 process.communicate(timeout=30)
+                if job is None:
+                    wait_posix_group(process.pid)
             except (Exception, KeyboardInterrupt) as cleanup_error:
                 try:
                     process.kill()
@@ -173,19 +210,63 @@ def cmd(args, cwd=ROOT, timeout=1800, check=True, input_text=None, cancellable=F
                     reason = str(cleanup_error) or type(cleanup_error).__name__
                     raise RecoveryRequired(f'Encerramento dos subprocessos não confirmado: {reason}') from cleanup_error
             raise
+        if raw_paths:
+            stdout = stdout.decode('utf-8')
+        if raw:
+            stderr = stderr.decode('utf-8', errors='replace')
         p = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
     if check and p.returncode:
         raise RuntimeError(f'{args[0]} exited {p.returncode}: {p.stderr[-2000:]}')
     return p
 
 
-def git(*args, cwd=ROOT, check=True):
-    return cmd(['git', *args], cwd=cwd, timeout=180, check=check)
+def git(*args, cwd=ROOT, check=True, env_overrides=None, input_bytes=None):
+    return cmd(['git', *args], cwd=cwd, timeout=180, check=check, raw_paths='-z' in args,
+               binary_output='--binary' in args, env_overrides=env_overrides, input_text=input_bytes)
+
+
+def hidden_index_changes(wt):
+    """Inspect masked entries against HEAD without changing the user's index flags."""
+    entries = git('ls-files', '-v', '--stage', '-z', cwd=wt).stdout.split('\0')
+    masked = set()
+    skipped = set()
+    changes = []
+    for entry in filter(None, entries):
+        metadata, name = entry.split('\t', 1)
+        tag, mode, *_ = metadata.split()
+        if tag.islower() or tag == 'S':
+            masked.add(name)
+        if tag.upper() == 'S':
+            skipped.add(name)
+        if mode == '160000':
+            module = Path(wt) / name
+            if (module / '.git').exists():
+                changes.extend(f'{name}/{path}' for path in hidden_index_changes(module))
+    if masked:
+        # A fresh index has neither cached stat data nor assume-unchanged/skip-worktree
+        # bits. Git itself compares file modes, symlinks and filtered contents.
+        with tempfile.TemporaryDirectory(dir=STORE) as directory:
+            env = {'GIT_INDEX_FILE': str(Path(directory).resolve() / 'index')}
+            config = ('-c', 'core.sparseCheckout=false', '-c', 'core.ignoreStat=false',
+                      '-c', 'core.fsmonitor=false', '-c', 'core.splitIndex=false')
+            git(*config, 'read-tree', 'HEAD', cwd=wt, env_overrides=env)
+            paths = git(*config, 'diff', '--name-only', '--no-renames', '--ignore-submodules=none',
+                        '-z', 'HEAD', '--', cwd=wt, env_overrides=env).stdout
+            different = masked.intersection(paths.split('\0'))
+            missing = {name for name in skipped & different if not os.path.lexists(Path(wt) / name)}
+            if missing and git('config', '--bool', '--get', 'core.sparseCheckout',
+                               cwd=wt, check=False).stdout.strip() == 'true':
+                # Only absences outside the configured sparse selection are expected.
+                names = ('\0'.join(sorted(missing)) + '\0').encode('utf-8')
+                included = git('sparse-checkout', 'check-rules', '-z', cwd=wt, input_bytes=names)
+                different -= missing.difference(included.stdout.split('\0'))
+            changes.extend(sorted(different))
+    return changes
 
 
 def changed_files(wt):
     """Porcelain -z returns raw names; renames contain destination AND source."""
-    records = iter(git('status', '--porcelain', '-z', '-uall', cwd=wt).stdout.split('\0'))
+    records = iter(git('status', '--porcelain', '--ignore-submodules=none', '-z', '-uall', cwd=wt).stdout.split('\0'))
     paths = []
     for record in records:
         if not record:
@@ -193,17 +274,54 @@ def changed_files(wt):
         paths.append(record[3:])
         if 'R' in record[:2] or 'C' in record[:2]:
             paths.append(next(records))
-    return list(dict.fromkeys(paths))
+    return list(dict.fromkeys([*paths, *hidden_index_changes(wt)]))
+
+
+def check_paths_in_scope(task, paths):
+    for name in paths:
+        if not any(name == item.rstrip('/') or name.startswith(item.rstrip('/') + '/')
+                   for item in task['files']):
+            raise RuntimeError(f'Arquivo fora do escopo em {task["id"]}: {name}')
+
+
+def check_tree_scope(task, wt, before, after):
+    paths = git('diff', '--name-only', '--no-renames', '--ignore-submodules=none',
+                '-z', before, after, cwd=wt).stdout.split('\0')
+    check_paths_in_scope(task, filter(None, paths))
 
 
 def check_scope(task, wt, base):
-    # Include committed changes; --no-renames checks both sides of a rename.
-    committed = git('diff', '--name-only', '--no-renames', '-z', base, 'HEAD', cwd=wt).stdout.split('\0')
-    for name in [*changed_files(wt), *filter(None, committed)]:
-        normalized = name.replace('\\', '/')
-        if not any(normalized == item.rstrip('/') or normalized.startswith(item.rstrip('/') + '/')
-                   for item in task['files']):
-            raise RuntimeError(f'Arquivo fora do escopo em {task["id"]}: {name}')
+    check_paths_in_scope(task, changed_files(wt))
+    check_tree_scope(task, wt, base, 'HEAD')
+
+
+def protect_untracked_files(before, after):
+    """Check added destinations and file/directory replacements, including ignored data."""
+    added = git('diff', '--name-only', '--diff-filter=AT', '--no-renames',
+                '--ignore-submodules=none', '-z', before, after).stdout
+    for name in filter(None, added.split('\0')):
+        path = ROOT
+        for part in name.split('/'):
+            path = path / part
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                path = None
+                break
+            if path.is_junction() or (stat.S_ISDIR(mode) and (path / '.git').exists()):
+                raise RuntimeError(f'Integração atingiria uma junção ou repositório local: {path}')
+            if not stat.S_ISDIR(mode):
+                break
+        if path is None:
+            continue
+        # No exclusion options: Git includes ignored files and nested repositories.
+        # Match the on-disk spelling even on case-insensitive filesystems.
+        relative = path.relative_to(ROOT).as_posix()
+        collision = git('ls-files', '--others', '--directory', '-z',
+                        '--', f':(icase,literal){relative}').stdout
+        if collision:
+            first_path = collision.partition('\0')[0]
+            raise RuntimeError(f'Arquivo local seria sobrescrito: {first_path}')
 
 
 def branch_ref(wt):
@@ -384,13 +502,20 @@ def review(task, artifact, test_command):
         raise RuntimeError('HEAD do worktree difere do commit candidato')
     test = run_tests(test_command, wt, head, expected_branch=artifact.get('branch')) if test_command else None
     test_output = (test.stdout + '\n' + test.stderr)[-10000:] if test else 'Nenhum comando de teste configurado'
-    diff = git('show', '--format=medium', '--stat', 'HEAD', cwd=wt).stdout
-    patch = git('show', '--format=', '--binary', '--no-textconv', '--no-ext-diff', 'HEAD', cwd=wt).stdout
+    diff = git('show', '--format=medium', '--stat', '--ignore-submodules=none', 'HEAD', cwd=wt).stdout
+    patch_bytes = git('show', '--format=', '--binary', '--no-textconv', '--no-ext-diff', '--ignore-submodules=none', 'HEAD', cwd=wt).stdout
+    # Latin-1 is a reversible mapping even for a patch with mixed encodings.
+    for encoding in ('utf-8', 'cp1252', 'latin-1'):
+        try:
+            patch = patch_bytes.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
     prompt = ('Você é revisor de código. Verifique a task e o diff contra critérios de aceitação. '
               'Responda EXATAMENTE com uma palavra na primeira linha: APPROVED ou REJECTED. '
               'Nas linhas seguintes explique problemas encontrados. Testes não executados NÃO equivalem a testes aprovados. '
               'Não modifique arquivos.\n' + json.dumps({'task': task, 'context': artifact.get('context', ''), 'diff_summary':diff,
-                     'patch':patch, 'executor_report':artifact['report'],
+                     'patch':patch, 'patch_encoding':encoding, 'executor_report':artifact['report'],
                      'test_exit_code':test.returncode if test else None,
                      'test_output':test_output}, ensure_ascii=False))
     response = cmd(['claude', '-p', '--model', 'sonnet', '--output-format', 'json',
@@ -445,7 +570,9 @@ def execute(plan, max_workers, retries, tests, reservation=None):
         path = STORE / 'status.json'
         state = {'statuses': {}, 'details': {}}
         try:
-            if state_initialized:
+            if isinstance(error, IntegrationStateError):
+                state = error.state
+            elif state_initialized:
                 state = json.loads(path.read_text(encoding='utf-8'))
         except (ValueError, OSError):
             keep_lock = True
@@ -473,7 +600,7 @@ def _execute(plan, max_workers, retries, tests):
         raise RuntimeError('Configure um comando de testes via --test (obrigatório)')
     if not shutil.which('agy') or not shutil.which('claude'):
         raise RuntimeError('Instale/autentique agy e claude; ambos devem estar no PATH')
-    if git('status', '--porcelain').stdout.strip():
+    if changed_files(ROOT):
         raise RuntimeError('Repositório precisa estar limpo antes de executar')
     target = TargetCheckout(branch_ref(ROOT), git('rev-parse', 'HEAD').stdout.strip())
     try:
@@ -485,6 +612,15 @@ def _execute(plan, max_workers, retries, tests):
         # reservation if the target still matches the last verified revision.
         target.verify()
         raise
+
+
+def persist_integration_state(statuses, details):
+    state = {'statuses': statuses, 'details': details}
+    try:
+        write_json(STORE / 'status.json', state)
+    except (Exception, KeyboardInterrupt) as error:
+        # The previous on-disk snapshot can predate the cherry-pick.
+        raise IntegrationStateError(state, error) from error
 
 
 def _run_tasks(plan, max_workers, retries, tests, target):
@@ -573,6 +709,15 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                     ok, feedback, _ = review(t, artifact, tests)
                     if ok:
                         target.verify()
+                        candidate = artifact['commit']
+                        # Earlier tasks in a parallel batch may have changed the
+                        # destination tree. Inspect the actual three-way merge.
+                        merged_tree = (candidate if target.head == base else
+                                       git('merge-tree', '--write-tree', target.head, candidate).stdout.strip())
+                        check_tree_scope(t, ROOT, target.head, merged_tree)
+                        protect_untracked_files(target.head, merged_tree)
+                        details[t['id']].update(commit=candidate, target_before=target.head, review=feedback)
+                        write_json(STORE / 'status.json', {'statuses': statuses, 'details': details})
                         check_stop()
                         try:
                             applied=git('cherry-pick', artifact['commit'], check=False)
@@ -597,6 +742,12 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                             integrated_head = git('rev-parse', 'HEAD').stdout.strip()
                         except (Exception, KeyboardInterrupt) as error:
                             raise RecoveryRequired(f'Não foi possível identificar o HEAD integrado: {error}') from error
+                        details[t['id']]['integrated_commit'] = integrated_head
+                        persist_integration_state(statuses, details)
+                        try:
+                            check_tree_scope(t, ROOT, target.head, integrated_head)
+                        except (Exception, KeyboardInterrupt) as error:
+                            raise RecoveryRequired(f'Escopo do commit integrado não confirmado: {error}') from error
                         try:
                             integrated=run_tests(tests, ROOT, integrated_head, recovery=True,
                                                  expected_branch=target.branch)
@@ -608,6 +759,7 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                         except (Exception, KeyboardInterrupt) as integration_error:
                             check_revision(ROOT, integrated_head, target.branch, recovery=True)
                             try:
+                                protect_untracked_files(integrated_head, target.head)
                                 revert = git('revert','--no-edit',integrated_head,check=False)
                             except (Exception, KeyboardInterrupt) as error:
                                 raise RecoveryRequired(f'Falha ao executar revert: {error}') from error
@@ -618,13 +770,15 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                             except (Exception, KeyboardInterrupt) as error:
                                 raise RecoveryRequired(f'Não foi possível identificar o HEAD após revert: {error}') from error
                             check_revision(ROOT, reverted_head, target.branch, recovery=True)
+                            details[t['id']]['revert_commit'] = reverted_head
+                            persist_integration_state(statuses, details)
                             target.head = reverted_head
                             if isinstance(integration_error, (KeyboardInterrupt, RunCancelled)):
                                 raise
                             raise RuntimeError(f'Integração revertida: {integration_error}') from integration_error
-                        target.head = integrated_head
                         statuses[t['id']]='approved'
-                        details[t['id']].update(commit=artifact['commit'], review=feedback)
+                        persist_integration_state(statuses, details)
+                        target.head = integrated_head
                         break
                     if attempt == retries:
                         raise RuntimeError('Rejeitado após tentativas: '+feedback[-2000:])
@@ -643,7 +797,7 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                         git('reset','--soft',original_base,cwd=wt)
                         git('-c','user.name=Agent Executor','-c','user.email=agent@localhost','commit','-m',f'agent: {t["id"]} revised',cwd=wt)
                         artifact['commit']=git('rev-parse','HEAD',cwd=wt).stdout.strip()
-                except RunCancelled:
+                except (RunCancelled, IntegrationStateError):
                     raise
                 except Exception as e:
                     statuses[t['id']]='failed'
@@ -655,7 +809,8 @@ def _run_tasks(plan, max_workers, retries, tests, target):
                         write_json(STORE/'status.json', {'statuses':statuses,'details':details, 'recovery_required': True})
                         return statuses
                     break
-            write_json(STORE/'status.json', {'statuses':statuses,'details':details})
+            if statuses[t['id']] != 'approved':
+                write_json(STORE/'status.json', {'statuses':statuses,'details':details})
     while True:
         blocked = [t['id'] for t in plan['tasks'] if statuses[t['id']] == 'pending'
                    and any(statuses[x] in ('failed', 'blocked') for x in t['deps'])]
@@ -676,7 +831,8 @@ def main():
     p.add_argument('--parallel',type=int,default=3)
     p.add_argument('--retries',type=int,default=2)
     p.add_argument('--reservation', help=argparse.SUPPRESS)
-    p.add_argument('--test',nargs=argparse.REMAINDER,default=None,help='Última opção: comando e todos os argumentos de teste')
+    p.add_argument('--test', nargs=argparse.REMAINDER, default=None,
+                   help='Última opção. Comando confiável executado com as permissões do worker antes da revisão e na integração.')
     args=p.parse_args()
     if args.stop:
         print(request_stop())

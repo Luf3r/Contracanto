@@ -10,11 +10,13 @@ from orchestrator import ROOT, STORE, validate, reserve_run, release_run, reques
 mcp = FastMCP('Contracanto')
 
 @mcp.tool()
-def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, test_command_json: str = '[]') -> str:
+def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, *, test_command_json: str) -> str:
     """Recebe um plano criado pelo Claude e INICIA sua execução local em segundo plano.
     plan_json: objeto JSON com goal e tasks [{id,description,deps,files,acceptance}].
     test_command_json: lista JSON de argumentos do comando de teste, ex. ["python","-m","pytest"].
-    ATENÇÃO: Apenas projetos Git locais confiáveis e sem segredos; não executa deploy.
+    Forneça somente projetos, planos e comandos de teste confiáveis. O comando e o código
+    testado rodam com as permissões locais do worker antes da revisão e após a integração.
+    Podem acessar arquivos fora do worktree, credenciais e rede, inclusive para push ou deploy.
     """
     plan = json.loads(plan_json)
     validate(plan)
@@ -22,7 +24,7 @@ def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, test_comman
         return 'Erro: parallel 1..8; retries 0..3'
     test = json.loads(test_command_json)
     if not isinstance(test, list) or not test or any(not isinstance(v, str) for v in test):
-        return 'Erro: test_command_json deve ser uma lista de strings'
+        return 'Erro: test_command_json deve ser uma lista não vazia de strings'
     try:
         token = reserve_run()
     except RuntimeError as error:
@@ -36,7 +38,7 @@ def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, test_comman
         write_json(STORE / 'status.json', {'state': 'starting', 'run_id': reservation_id(token), 'statuses': {}})
         with (STORE / 'run.log').open('w', encoding='utf-8') as log:
             proc = subprocess.Popen(argv, cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log,
-                                    stderr=subprocess.STDOUT, **kw)
+                                    stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONIOENCODING='utf-8'), **kw)
     except Exception as error:
         try:
             write_json(STORE / 'status.json', {'state': 'failed', 'run_id': reservation_id(token),
@@ -65,7 +67,14 @@ def get_run_status() -> str:
     path = STORE / 'status.json'
     status = path.read_text(encoding='utf-8') if path.exists() else 'Nenhum estado registrado'
     logfile = STORE / 'run.log'
-    log = logfile.read_text(encoding='utf-8')[-4000:] if logfile.exists() else ''
+    try:
+        data = logfile.read_bytes()
+    except FileNotFoundError:
+        data = b''
+    try:
+        log = data.decode('utf-8')[-4000:]
+    except UnicodeDecodeError:
+        log = data.decode('cp1252', errors='replace')[-4000:]
     reservation = STORE / 'run.lock'
     try:
         record = json.loads(reservation.read_text(encoding='utf-8'))

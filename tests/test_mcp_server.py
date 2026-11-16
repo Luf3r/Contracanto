@@ -17,6 +17,20 @@ PLAN = json.dumps({'tasks': [dict(id='A', description='Example', deps=[],
 
 
 class SubmissionTests(unittest.TestCase):
+    def test_submit_schema_requires_test_command(self):
+        tool = server.mcp._tool_manager.get_tool('submit_plan')
+        self.assertIn('test_command_json', tool.parameters['required'])
+
+    def test_status_with_legacy_log_encoding(self):
+        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+            store = Path(directory)
+            (store / 'status.json').write_text('{"state":"failed"}', encoding='utf-8')
+            (store / 'run.log').write_bytes('falha de execução'.encode('cp1252'))
+            with patch.object(server, 'STORE', store):
+                report = server.get_run_status()
+            self.assertIn('"state":"failed"', report)
+            self.assertIn('falha de execução', report)
+
     def test_stop_before_worker_claim_and_stale_request(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory, \
                 patch.object(o, 'STORE', Path(directory)), patch.object(server, 'STORE', Path(directory)):

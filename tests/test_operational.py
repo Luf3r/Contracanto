@@ -1,6 +1,7 @@
 """Regressões operacionais; nenhum teste chama modelos pagos."""
 import json
 import concurrent.futures
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -107,6 +108,8 @@ class OperationalTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, '', '')
         def git(*args, **kwargs):
             output = patch_text if args[0] == 'show' else ('commit' if args[0] == 'rev-parse' else '')
+            if '--binary' in args:
+                output = output.encode()
             return subprocess.CompletedProcess(args, 0, output, '')
         with patch.object(o, 'cmd', side_effect=command), patch.object(o, 'git', side_effect=git):
             self.assertTrue(o.review(task(['a']), dict(worktree='.', report='done'), ['test'])[0])
@@ -187,6 +190,28 @@ class OperationalTests(unittest.TestCase):
                 artifact = o.run_executor(task(['old.txt', 'ação com espaço.txt']), git('rev-parse', 'HEAD').stdout.strip(), '')
             self.assertEqual(git('status', '--porcelain').stdout, '')
             self.assertEqual(artifact['commit'], git('rev-parse', 'HEAD').stdout.strip())
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX filenames')
+    def test_literal_backslash_does_not_grant_directory_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            o.git('init', cwd=root)
+            o.git('-c', 'user.name=Test', '-c', 'user.email=test@localhost',
+                  'commit', '--allow-empty', '-m', 'baseline', cwd=root)
+            (root / r'src\outside').touch()
+            with self.assertRaisesRegex(RuntimeError, 'fora do escopo'):
+                o.check_scope({'files': ['src'], 'id': 'A'}, root, 'HEAD')
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX process group')
+    def test_success_stops_background_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / 'late'
+            child = f'import time; from pathlib import Path; time.sleep(1); Path({str(marker)!r}).touch()'
+            parent = ('import subprocess as s, sys; '
+                      f's.Popen([sys.executable, "-c", {child!r}], stdin=s.DEVNULL, stdout=s.DEVNULL, stderr=s.DEVNULL)')
+            self.assertEqual(o.cmd([sys.executable, '-c', parent]).returncode, 0)
+            time.sleep(1.2)
+            self.assertFalse(marker.exists())
 
     def test_timeout_stops_descendant_before_it_writes(self):
         with tempfile.TemporaryDirectory(dir=o.STORE) as directory:

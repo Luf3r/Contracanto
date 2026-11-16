@@ -59,6 +59,10 @@ class GitIntegrationTests(unittest.TestCase):
             state = json.loads((store / 'status.json').read_text())
             self.assertEqual(state['state'], 'cancelled' if isinstance(error, o.RunCancelled) else 'failed')
             self.assertFalse(state.get('recovery_required', False))
+            details = state['details']['A']
+            self.assertEqual(details['revert_commit'], git('rev-parse', 'HEAD').stdout.strip())
+            self.assertEqual(details['integrated_commit'], git('rev-parse', 'HEAD^').stdout.strip())
+            self.assertEqual(details['target_before'], git('rev-parse', 'HEAD^^').stdout.strip())
             self.assertEqual(git('rev-parse', 'HEAD^{tree}').stdout.strip(), before)
             self.assertEqual(git('status', '--porcelain').stdout, '')
             self.assertEqual(git('rev-list', '--count', 'HEAD').stdout.strip(), '3')

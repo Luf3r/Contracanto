@@ -36,8 +36,8 @@ class RegressionTests(unittest.TestCase):
             calls.append(args)
             if args[0] == 'claude':
                 return subprocess.CompletedProcess(args, 0, json.dumps({'result': 'APPROVED', 'is_error': False}), '')
-            return subprocess.CompletedProcess(args, 0, '', '')
-        with patch.object(o, 'cmd', side_effect=command), patch.object(o, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')):
+            return subprocess.CompletedProcess(args, 0, b'' if '--binary' in args else '', '')
+        with patch.object(o, 'cmd', side_effect=command):
             o.review(task('A'), {'worktree': '.', 'report': 'done'}, ['python', 'test.py'])
         review_args = next(args for args in calls if args[0] == 'claude')
         self.assertEqual(review_args[review_args.index('--model') + 1], 'sonnet')
