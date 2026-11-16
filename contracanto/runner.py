@@ -12,8 +12,10 @@ import json
 import logging
 import os
 import shutil
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from . import agents, config, gitops, state
 from .agents import Artifact
@@ -30,9 +32,31 @@ def _summary(error: BaseException) -> str:
     return describe(error).splitlines()[0][:300]
 
 
+def resolve_command(command: Sequence[str], root: Path, label: str) -> list[str]:
+    """Confere, antes de gastar uma chamada ao agente, que o executável do comando existe.
+
+    No Windows, um script `.cmd` ou `.bat` encontrado no PATH (como `npm`) é
+    trocado pelo caminho completo, porque o sistema só acha sozinho os `.exe`.
+    """
+    name = command[0]
+    candidates = [shutil.which(name)]
+    if sys.platform == 'win32':
+        # O Windows procura primeiro no diretório do interpretador em execução.
+        beside = Path(sys.executable).parent / name
+        candidates += [str(path) for path in (beside, beside.with_name(beside.name + '.exe')) if path.is_file()]
+    found = next((candidate for candidate in candidates if candidate), None)
+    if found is None:
+        if (root / name).is_file():
+            return list(command)
+        raise RuntimeError(f'{label} não encontrado: {name}. Confira o comando e o PATH do worker')
+    if sys.platform == 'win32' and Path(found).suffix.lower() in ('.cmd', '.bat'):
+        return [found, *command[1:]]
+    return list(command)
+
+
 def execute(
     ws: Workspace,
-    plan: Plan | Path,
+    plan: Mapping[str, Any] | Path,
     max_workers: int,
     retries: int,
     tests: Sequence[str] | None,
@@ -68,7 +92,7 @@ def execute(
         # CLI e MCP começam com estado próprio antes de qualquer preparação.
         ws.publish_run(run_id)
         run.save()
-        loaded: Plan = json.loads(plan.read_text(encoding='utf-8')) if isinstance(plan, Path) else plan
+        loaded: Any = json.loads(plan.read_text(encoding='utf-8')) if isinstance(plan, Path) else plan
         # O plano da CLI ou do MCP só é publicado depois de provada a posse da reserva.
         state.write_json(ws.plan(run_id), loaded)
         ctx.stop.check()
@@ -103,6 +127,9 @@ def _execute(
         raise RuntimeError('Configure um comando de testes via --test (obrigatório)')
     if not shutil.which('agy') or not shutil.which('claude'):
         raise RuntimeError('Instale/autentique agy e claude; ambos devem estar no PATH')
+    tests = resolve_command(tests, ctx.root, 'Comando de testes')
+    if ctx.setup:
+        ctx.setup = resolve_command(ctx.setup, ctx.root, 'Comando de preparação')
     if gitops.changed_files(ctx.root):
         raise RuntimeError('Repositório precisa estar limpo antes de executar')
     target = TargetCheckout.current(ctx.root)

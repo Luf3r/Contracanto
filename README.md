@@ -56,7 +56,7 @@ py orchestrator.py plan.example.json --parallel 3 --retries 2 --test py -m pytes
 
 O plano de exemplo é ilustrativo; adaptações são necessárias conforme o stack. Sem pytest instalado, configure um comando válido antes de executar. Para um primeiro teste, use --parallel 1.
 
-`--test` deve ser a **última opção**: todos os argumentos seguintes pertencem ao comando de testes, inclusive `-m`, `-v` e outras flags. `py orchestrator.py --help` lista todas as opções. `--repo CAMINHO` escolhe o repositório a orquestrar e `--keep-worktrees` preserva worktree e branch das tarefas aprovadas.
+`--test` deve ser a **última opção**: todos os argumentos seguintes pertencem ao comando de testes, inclusive `-m`, `-v` e outras flags. `py orchestrator.py --help` lista todas as opções e `--version` mostra a versão. `--repo CAMINHO` escolhe o repositório a orquestrar e `--keep-worktrees` preserva worktree e branch das tarefas aprovadas.
 
 Cada tarefa roda em um worktree novo, que só contém os arquivos rastreados pelo Git: `.venv`, `node_modules` e outros diretórios ignorados não existem ali. Se os testes dependem deles, informe um comando de preparação com `--setup-json`, uma lista JSON de argumentos, antes de `--test`:
 
@@ -66,7 +66,7 @@ py orchestrator.py plan.example.json --setup-json '[\"npm\",\"ci\"]' --test npm 
 
 O comando roda em cada worktree antes da implementação, com as mesmas permissões do comando de testes, e só pode criar arquivos ignorados pelo Git; se falhar ou deixar outros arquivos, a tarefa falha. O PowerShell 5.1 exige as aspas internas escapadas com `\"`, como no exemplo; no PowerShell 7 e no bash basta `'["npm","ci"]'`.
 
-Erros de uso e de preparação, como plano inexistente ou repositório com alterações, saem em uma linha iniciada por `Erro:`, com código de saída diferente de zero.
+Erros de uso e de preparação, como plano inexistente ou repositório com alterações, saem em uma linha iniciada por `Erro:`, com código de saída diferente de zero. Antes de chamar qualquer agente, o worker confere se os executáveis dos comandos de testes e de preparação existem. No Windows, um script `.cmd` ou `.bat` encontrado no PATH, como `npm`, é chamado pelo caminho completo.
 
 ## Operação pela linha de comando
 
@@ -90,7 +90,7 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_REVIEW_TIMEOUT` | 900 | Segundos para cada chamada ao revisor |
 | `CONTRACANTO_GIT_TIMEOUT` | 180 | Segundos para cada comando Git |
 | `CONTRACANTO_REVIEW_MODEL` | `sonnet` | Modelo usado pelo revisor |
-| `CONTRACANTO_IMPLEMENT_RETRIES` | 1 | Novas chamadas ao `agy` quando a implementação falha (0 a 3) |
+| `CONTRACANTO_AGENT_RETRIES` | 1 | Novas chamadas ao `agy` quando uma implementação ou correção falha (0 a 3) |
 | `CONTRACANTO_REVIEW_PATCH_LIMIT` | 400000 | Tamanho máximo do patch enviado ao revisor, em caracteres |
 
 ## Testes deste projeto
@@ -101,7 +101,7 @@ Os testes usam `unittest`, incluído no Python, e Git local. Não chamam os CLIs
 .\.venv\Scripts\python.exe scripts/run_tests.py
 ```
 
-`-j N` limita os processos, `-v` mostra cada teste com o tempo gasto e um texto qualquer seleciona os testes cujo identificador o contém (por exemplo `scripts/run_tests.py test_scope_gates`). `python -m unittest discover -s tests -v` continua funcionando, de forma serial.
+`-j N` limita os processos, `-v` mostra cada teste com o tempo gasto e um texto qualquer seleciona os testes cujo identificador o contém (por exemplo `scripts/run_tests.py test_scope_gates`). Um teste que passa de `--timeout` segundos (padrão 300) é encerrado com seus subprocessos e aparece como falha, com o nome dele. `python -m unittest discover -s tests -v` continua funcionando, de forma serial.
 
 Há regressões de parsing da CLI, IDs que diferem apenas por maiúsculas/minúsculas, escopo com Unicode/espaços/renomeações, prompts grandes por stdin, estado terminal, reserva de execução e rollback. Há testes com Git e subprocessos reais para encerramento de descendentes por timeout, execução paralela, dependências e rejeição seguida de correção e integração. Os modelos são simulados; os testes de recuperação também injetam falhas operacionais, incluindo erros de leitura do Git após os testes de integração. A CI executa a suíte e `pip check`. No Windows, os testes cobrem também encerramento após a saída do processo pai, indisponibilidade de `taskkill`, falha de associação ao Job Object e isolamento entre comandos paralelos.
 
@@ -142,7 +142,7 @@ O MCP exige `plan_json` e `test_command_json`. Ambos são strings contendo JSON.
 
 Quem fornece `--test` ou `test_command_json` escolhe um comando local. O worker recebe uma lista não vazia de argumentos e inicia o executável diretamente. O comando e o código que ele carrega rodam fora do sandbox do Antigravity, com as permissões do usuário, inclusive acesso à rede, às credenciais e a arquivos fora do repositório. Podem fazer push ou deploy. Use apenas comandos, planos e código de origem confiável. A primeira execução ocorre no worktree antes do parecer do revisor. Cada nova revisão repete o teste, e a integração o executa novamente na branch de destino.
 
-`parallel` aceita 1 a 8. `retries` aceita 0 a 3 e controla as tentativas de correção após rejeição da revisão. Uma falha da própria implementação, como um timeout ou um erro do `agy`, é outra coisa: a chamada é repetida no mesmo worktree até `CONTRACANTO_IMPLEMENT_RETRIES` vezes, desde que a branch e o commit do worktree estejam intactos e o encerramento dos processos tenha sido confirmado.
+`parallel` aceita 1 a 8. `retries` aceita 0 a 3 e controla as tentativas de correção após rejeição da revisão. Uma falha da própria chamada ao `agy`, como um timeout ou um erro do CLI, é outra coisa: na implementação ou em uma correção, a chamada é repetida no mesmo worktree até `CONTRACANTO_AGENT_RETRIES` vezes, desde que a branch e o commit do worktree estejam intactos e o encerramento dos processos tenha sido confirmado.
 
 Se os testes do worktree falharem, o executor recebe o parecer do revisor, o código de saída e o trecho final da saída dos testes na tentativa de correção. Se as tentativas se esgotarem, consulte o diagnóstico em `details.<id>.review` e o resumo em `details.<id>.error` no status da tarefa.
 
@@ -174,11 +174,11 @@ Com o pacote instalado, use `"command": "C:\\CAMINHO\\DO\\VENV\\Scripts\\contrac
 
 Para orquestrar um repositório diferente daquele onde o Contracanto está instalado, acrescente ao servidor `"env": {"CONTRACANTO_REPO": "C:\\Users\\USUARIO\\OUTRO_PROJETO"}`.
 
-Alternativamente, configure o MCP no ambiente local do Claude Code. O MCP de Chat e o da aba Code não são os mesmos. Reinicie a sessão local do Claude e verifique se aparecem as ferramentas `submit_plan`, `stop_run`, `get_run_status` e `get_submitted_plan`.
+Alternativamente, configure o MCP no ambiente local do Claude Code. O MCP de Chat e o da aba Code não são os mesmos. Reinicie a sessão local do Claude e verifique se aparecem as ferramentas `submit_plan`, `wait_for_run`, `get_run_status`, `stop_run` e `get_submitted_plan`.
 
 Peça ao Claude na aba Code:
 
-> Inspecione este repositório, proponha um plano em tarefas pequenas e verificáveis com dependências e arquivos autorizados; use submit_plan para iniciar execução com 3 workers e testes `py -m pytest`. Revise as tasks automaticamente via Claude CLI. Não faça deploy/push ou modificações destrutivas. Consulte get_run_status ao final.
+> Inspecione este repositório, proponha um plano em tarefas pequenas e verificáveis com dependências e arquivos autorizados; use submit_plan para iniciar execução com 3 workers e testes `py -m pytest`. Revise as tasks automaticamente via Claude CLI. Não faça deploy/push ou modificações destrutivas. Acompanhe com wait_for_run e consulte get_run_status ao final.
 
 ## Comportamento e limitações
 - O Claude cria o grafo de tarefas e envia pelo MCP. A fila é executada por Python, chamando `agy` em worktrees locais isolados.
@@ -188,7 +188,8 @@ Peça ao Claude na aba Code:
 - Após cada implementação ou correção, o orquestrador confere a branch atribuída ao worktree e o commit esperado antes de registrar as mudanças. Uma troca de branch no mesmo commit também faz a tarefa falhar. O escopo é conferido pelo diff completo entre a base e o candidato antes de cada revisão, incluindo origem e destino de renomeações.
 - A integração termina na branch local. Depois de integrada e aprovada, a tarefa tem seu worktree e sua branch `agent/*` removidos; `details.<id>.worktree_removed` registra a limpeza e `cleanup_error` uma eventual falha, que não altera o resultado. Use `--keep-worktrees` (ou `keep_worktrees` em `submit_plan`) para preservá-los. Tarefas que falham, inclusive por conflito de cherry-pick, sempre mantêm worktree e branch para inspeção.
 - Antes do cherry-pick, o worker compara os caminhos da integração prevista com a lista `files` da tarefa. Se uma tarefa anterior moveu um diretório e o Git redirecionaria uma adição para fora do escopo, a integração é recusada. Depois do cherry-pick, o worker confere os caminhos do commit aplicado antes de executar os testes.
-- `get_run_status` precisa ser consultado; o aplicativo Claude não recebe notificação push de término. `reservation.worker_alive` indica se o worker ainda está rodando: com `false`, o estado não vai mais mudar e a reserva precisa ser liberada pelo operador.
+- O aplicativo Claude não recebe notificação push de término. `wait_for_run` espera a execução terminar, por até 600 segundos por chamada, e devolve um resumo curto; `get_run_status` devolve o relatório completo, com pareceres, tempos e log. `worker_alive` indica se o worker ainda está rodando: com `false`, o estado não vai mais mudar e a reserva precisa ser liberada pelo operador.
+- Cada tarefa aprovada vira um commit na branch de destino, com o identificador e a descrição da tarefa no assunto e a execução de origem no corpo.
 - Não há retomada após desligar o processo, limitação de custos/tokens, isolamento forte de execução ou fila transacional. Não use em repositórios reais até adicionar esses recursos.
 - Scripts usam revisão por modelo e não garantem correção ou segurança. Execute testes e auditoria adicionais antes de merge de produção.
 - Manter `agy` e `claude` no PATH do processo MCP e ter autenticação ativa é obrigatório.
@@ -225,6 +226,6 @@ Nenhum módulo guarda estado global: o repositório e o diretório de execuçõe
 
 ## Dependências e validação de alterações
 
-`pyproject.toml` é a única declaração das dependências diretas (`mcp` e, no Windows, `pywin32`) e das ferramentas de desenvolvimento (`ruff` e `mypy`, no extra `dev`), além do pacote e de seus comandos. `requirements.lock.txt` fixa também as transitivas do ambiente validado; use-o na instalação e na CI. Para desenvolver, instale o lock e depois `python -m pip install -e ".[dev]"`. A CI executa `ruff check .`, `ruff format --check .` e `mypy` além dos testes, pelo executor paralelo. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
+`pyproject.toml` é a única declaração das dependências diretas (`mcp` e, no Windows, `pywin32`) e das ferramentas de desenvolvimento (`ruff` e `mypy`, no extra `dev`), além do pacote e de seus comandos. `requirements.lock.txt` fixa também as transitivas do ambiente validado; use-o na instalação e na CI. Para desenvolver, instale o lock e depois `python -m pip install -e ".[dev]"`. A CI executa `ruff check .`, `ruff format --check .` e `mypy` além dos testes, pelo executor paralelo. O `mypy` confere o pacote, `scripts/` e `tests/`. A versão do pacote fica em `contracanto/__init__.py`. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
 
 A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Retomada automática após crash e orçamento de tokens/custo continuam fora do escopo deste protótipo; a reserva e a recuperação manual continuam obrigatórias nesses casos.

@@ -36,6 +36,7 @@ REVIEW_PROMPT = (
     '"problems": ["cada problema que impede a aprovação"]}.\n'
 )
 VERDICTS = ('APPROVED', 'REJECTED')
+COMMIT_SUBJECT_LENGTH = 72
 # Latin-1 é um mapeamento reversível mesmo para um patch com codificações misturadas.
 PATCH_ENCODINGS = ('utf-8', 'cp1252', 'latin-1')
 
@@ -177,28 +178,37 @@ def prepare_worktree(ctx: RunContext, wt: Path, base: str, branch: str) -> None:
         raise RuntimeError(f'Preparação do worktree alterou arquivos não ignorados, por exemplo {changed[0]}')
 
 
-def implement(ctx: RunContext, task: Task, wt: Path, base: str, branch: str, context: str) -> str:
+def call_agent(ctx: RunContext, task: Task, prompt: str, wt: Path, expected_head: str, branch: str | None) -> str:
     """Chama o agy e repete a chamada quando ela falha sem deixar o estado incerto."""
-    prompt = _with_payload(IMPLEMENT_PROMPT, {'task': task, 'context': context})
-    for attempt in range(config.IMPLEMENT_RETRIES + 1):
+    for attempt in range(config.AGENT_RETRIES + 1):
         try:
             return run_agy(prompt, wt, ctx.stop)
         except (RecoveryRequired, RunCancelled):
             raise
         except (RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
-            if attempt == config.IMPLEMENT_RETRIES:
+            if attempt == config.AGENT_RETRIES:
                 raise
             # O que o agente já escreveu fica para a nova tentativa, desde que a
             # branch e o commit do worktree continuem os esperados.
-            gitops.check_checkout(wt, base, branch)
+            gitops.check_checkout(wt, expected_head, branch)
             log.info(
-                '%s: implementação falhou (%s); nova tentativa %d de %d',
+                '%s: chamada ao agy falhou (%s); nova tentativa %d de %d',
                 task['id'],
                 describe(error).splitlines()[0][:200],
                 attempt + 1,
-                config.IMPLEMENT_RETRIES,
+                config.AGENT_RETRIES,
             )
     raise AssertionError('o laço retorna ou propaga o erro')
+
+
+def commit_message(ctx: RunContext, task: Task) -> str:
+    """Mensagem do commit candidato, que a integração leva para a branch de destino."""
+    task_id = task['id']
+    summary = ' '.join(task['description'].split())
+    room = COMMIT_SUBJECT_LENGTH - len(task_id) - 2
+    if len(summary) > room:
+        summary = summary[: room - 1].rstrip() + '…'
+    return f'{task_id}: {summary}\n\nTarefa {task_id} da execução {ctx.run_id[:12]} do Contracanto.'
 
 
 def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifact:
@@ -206,12 +216,13 @@ def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifa
     wt = make_worktree(ctx, task, base)
     branch = gitops.branch_ref(wt)
     prepare_worktree(ctx, wt, base, branch)
-    report = implement(ctx, task, wt, base, branch, context)
+    prompt = _with_payload(IMPLEMENT_PROMPT, {'task': task, 'context': context})
+    report = call_agent(ctx, task, prompt, wt, base, branch)
     gitops.check_checkout(wt, base, branch)
     gitops.check_scope(task, wt, base)
     if not gitops.changed_files(wt):
         raise RuntimeError(f'Gemini não alterou arquivos em {task["id"]}')
-    gitops.commit_all(wt, f'agent: {task["id"]}')
+    gitops.commit_all(wt, commit_message(ctx, task))
     return Artifact(task=task, worktree=str(wt), report=report, commit=gitops.head(wt), branch=branch, context=context)
 
 
@@ -220,15 +231,16 @@ def repair(ctx: RunContext, artifact: Artifact, base: str, context: str, feedbac
     task = artifact.task
     wt = Path(artifact.worktree)
     payload = {'task': task, 'context': context, 'review': feedback}
-    correction = run_agy(_with_payload(REPAIR_PROMPT, payload), wt, ctx.stop)
+    prompt = _with_payload(REPAIR_PROMPT, payload)
+    correction = call_agent(ctx, task, prompt, wt, artifact.candidate, artifact.branch)
     artifact.report += '\nCorreção: ' + correction
     gitops.check_checkout(wt, artifact.candidate, artifact.branch)
     gitops.check_scope(task, wt, base)
     if gitops.changed_files(wt):
-        gitops.commit_all(wt, f'agent: repair {task["id"]}')
+        gitops.commit_all(wt, f'correção de {task["id"]}')
         # A integração aplica um commit só: a sequência inteira vira um squash sobre a base.
         gitops.git('reset', '--soft', base, cwd=wt)
-        gitops.commit_staged(wt, f'agent: {task["id"]} revised')
+        gitops.commit_staged(wt, commit_message(ctx, task))
         artifact.commit = gitops.head(wt)
 
 

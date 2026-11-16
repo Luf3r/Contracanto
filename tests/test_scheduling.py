@@ -3,6 +3,7 @@
 import unittest
 
 from contracanto import plan, runner
+from contracanto.state import TaskStatus
 
 
 def task(tid, files, deps=()):
@@ -12,7 +13,7 @@ def task(tid, files, deps=()):
 class SchedulingTests(unittest.TestCase):
     def test_batch_respects_dependencies_and_worker_limit(self):
         tasks = [task('A', ['a.txt']), task('B', ['b.txt']), task('C', ['c.txt']), task('D', ['d.txt'], ['A'])]
-        statuses = dict.fromkeys('ABCD', 'pending')
+        statuses: dict[str, TaskStatus] = dict.fromkeys('ABCD', 'pending')
         self.assertEqual([t['id'] for t in runner.schedule_batch(tasks, statuses, 2)], ['A', 'B'])
         statuses.update(A='approved', B='failed')
         self.assertEqual([t['id'] for t in runner.schedule_batch(tasks, statuses, 8)], ['C', 'D'])
@@ -31,7 +32,7 @@ class SchedulingTests(unittest.TestCase):
 
     def test_failure_blocks_transitive_descendants_only(self):
         tasks = [task('A', ['a']), task('B', ['b'], ['A']), task('C', ['c'], ['B']), task('D', ['d'])]
-        statuses = {'A': 'failed', 'B': 'pending', 'C': 'pending', 'D': 'pending'}
+        statuses: dict[str, TaskStatus] = {'A': 'failed', 'B': 'pending', 'C': 'pending', 'D': 'pending'}
         runner.block_descendants(tasks, statuses)
         self.assertEqual(statuses, {'A': 'failed', 'B': 'blocked', 'C': 'blocked', 'D': 'pending'})
 

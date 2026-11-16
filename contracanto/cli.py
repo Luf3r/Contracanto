@@ -9,7 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import config, maintenance, runner, state
+from . import __version__, config, maintenance, runner, state
 from .errors import RunCancelled, describe
 from .plan import parse_command
 
@@ -20,6 +20,7 @@ def _parser() -> argparse.ArgumentParser:
         description='Orquestra a implementação de um plano pelo Antigravity e a revisão pelo Claude.',
         epilog='Ajustes por variável de ambiente: ' + ', '.join(config.ENV_PREFIX + n for n in config.TUNABLE),
     )
+    parser.add_argument('--version', action='version', version=f'contracanto {__version__}')
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('plan', type=Path, nargs='?', help='Arquivo JSON do plano a executar')
     action.add_argument('--stop', action='store_true', help='Solicita o encerramento da execução ativa')
@@ -70,7 +71,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None, ws: state.Workspace | None = None) -> None:
     parser = _parser()
-    args = parser.parse_args(argv)
+    _dispatch(parser, parser.parse_args(argv), ws)
+
+
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace, ws: state.Workspace | None) -> None:
     try:
         ws = ws or state.default_workspace(args.repo)
     except ValueError as error:
@@ -123,12 +127,14 @@ def main(argv: Sequence[str] | None = None, ws: state.Workspace | None = None) -
 def run() -> None:
     # Eventos da execução vão para a saída de erro: o terminal na CLI, run.log no MCP.
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='%(asctime)s %(message)s', datefmt='%H:%M:%S')
+    parser = _parser()
+    args = parser.parse_args()
     try:
-        main()
+        _dispatch(parser, args, None)
     except RunCancelled as error:
         sys.exit(str(error))
     except (RuntimeError, ValueError, OSError) as error:
-        if '--reservation' in sys.argv:
+        if args.reservation:
             # No worker do MCP a pilha completa vai para run.log.
             raise
         sys.exit(f'Erro: {describe(error)}')

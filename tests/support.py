@@ -137,7 +137,40 @@ class RepositoryTestCase(unittest.TestCase):
                         git('worktree', 'remove', '--force', str(wt))
 
 
-_FINISHED = []
+def fake_git_output(args, head='base'):
+    """Saída de um Git simulado: checkout limpo na branch main, no commit `head`."""
+    if args[0] == 'status':
+        return f'# branch.oid {head}\0# branch.head main\0'
+    if args[0] == 'symbolic-ref':
+        return 'refs/heads/main'
+    if args[0] == 'rev-parse':
+        return head
+    return ''
+
+
+def reserved_repository(test, worker_pid, recovery_required=False):
+    """Repositório limpo com uma reserva assumida por um worker de PID conhecido.
+
+    Devolve (workspace, run_id, git).
+    """
+    directory = test.enterContext(temp_dir())
+    git = init_repository(directory)
+    git('add', '.')
+    git('commit', '-m', 'baseline')
+    ws = state.Workspace.for_root(directory)
+    run_id = state.reservation_id(state.reserve_run(ws))
+    ws.publish_run(run_id)
+    ws.claim(run_id).mkdir()
+    ws.worker_pid(run_id).write_text(str(worker_pid))
+    run = state.RunState(ws.status(run_id), run_id)
+    run.state = 'running'
+    run.statuses = {'A': 'running', 'B': 'pending', 'C': 'approved'}
+    run.recovery_required = recovery_required
+    run.save()
+    return ws, run_id, git
+
+
+_FINISHED: list[subprocess.Popen] = []
 
 
 def finished_process_pid():

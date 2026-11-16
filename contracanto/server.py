@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,9 @@ WORKSPACE = state.default_workspace()
 # Diretório que contém o pacote; o worker o recebe no PYTHONPATH para rodar com
 # `python -m contracanto` em qualquer repositório, instalado ou não.
 PACKAGE_PARENT = Path(__file__).resolve().parent.parent
+# Segundos: teto de uma espera de wait_for_run e intervalo entre as leituras do estado.
+WAIT_LIMIT = 600
+WAIT_POLL_INTERVAL = 1.0
 
 
 def _parse_submission(
@@ -130,7 +135,7 @@ def submit_plan(
             state.release_run(ws, token)
         raise
     message = (
-        f'Execução {run_id} iniciada com PID {proc.pid}. Consulte get_run_status. '
+        f'Execução {run_id} iniciada com PID {proc.pid}. Acompanhe com wait_for_run ou get_run_status. '
         'O início não representa aprovação das tarefas.'
     )
     try:
@@ -158,9 +163,31 @@ def get_run_status() -> str:
     reservation_state: "active", "none" ou "incomplete"; reservation traz run_id, pid, stop_requested
     e worker_alive. Com worker_alive false a execução não vai mais avançar: pare de consultar e
     avise o operador, que inspeciona o repositório e libera a reserva com --unlock.
+    Para apenas esperar o término, prefira wait_for_run, que devolve um resumo curto.
     log: últimas linhas do log do worker lançado pelo MCP.
     """
     return json.dumps(maintenance.status_report(WORKSPACE), ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def wait_for_run(timeout_seconds: int = 120) -> str:
+    """Espera a execução terminar e retorna um resumo JSON, em vez de consultar repetidamente.
+
+    Retorna assim que a execução chega a um estado final, o worker morre ou não há execução
+    reservada; caso contrário, depois de timeout_seconds (1 a 600), com timed_out true. Nesse
+    caso chame de novo. Mantenha timeout_seconds abaixo do tempo limite de ferramentas do cliente.
+    O resumo traz run_id, state, statuses, task_errors, recovery_required, error,
+    duration_seconds, reservation_state, worker_alive e stop_requested. Para pareceres, tempos
+    por fase e log, use get_run_status.
+    """
+    deadline = time.monotonic() + max(1, min(timeout_seconds, WAIT_LIMIT))
+    while True:
+        report = maintenance.status_report(WORKSPACE)
+        done = maintenance.settled(report)
+        if done or time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(WAIT_POLL_INTERVAL)
+    return json.dumps({**maintenance.summarize(report), 'timed_out': not done}, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()

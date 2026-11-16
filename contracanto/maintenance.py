@@ -11,6 +11,7 @@ from . import gitops, process, state
 from .state import Workspace
 
 LOG_TAIL = 4000
+SUMMARY_ERROR_TAIL = 500
 
 
 def read_reservation(ws: Workspace) -> tuple[str, dict[str, Any] | None]:
@@ -71,6 +72,41 @@ def status_report(ws: Workspace) -> dict[str, Any]:
         run = _read_json(ws.status(run_id))
         log = read_log(ws.log(run_id))
     return {'run': run, 'reservation_state': reservation_state, 'reservation': reservation, 'log': log}
+
+
+def settled(report: dict[str, Any]) -> bool:
+    """Se o relatório não vai mais mudar sem intervenção: execução encerrada ou worker morto."""
+    if report['reservation_state'] == 'none':
+        return True
+    if report['reservation_state'] == 'incomplete':
+        return False
+    run = report['run'] or {}
+    reservation = report['reservation'] or {}
+    return run.get('state') in state.TERMINAL_STATES or not reservation.get('worker_alive', True)
+
+
+def summarize(report: dict[str, Any]) -> dict[str, Any]:
+    """Versão curta do relatório: estados e erros, sem pareceres, tempos por fase nem log."""
+    run = report['run'] or {}
+    reservation = report['reservation'] or {}
+    details = run.get('details') or {}
+    errors = {
+        task_id: str(detail['error'])[:SUMMARY_ERROR_TAIL]
+        for task_id, detail in details.items()
+        if isinstance(detail, dict) and detail.get('error')
+    }
+    return {
+        'run_id': run.get('run_id'),
+        'state': run.get('state'),
+        'recovery_required': bool(run.get('recovery_required')),
+        'error': run.get('error'),
+        'duration_seconds': run.get('duration_seconds'),
+        'statuses': run.get('statuses') or {},
+        'task_errors': errors,
+        'reservation_state': report['reservation_state'],
+        'worker_alive': reservation.get('worker_alive'),
+        'stop_requested': bool(reservation.get('stop_requested')),
+    }
 
 
 def _read_pid(path: Path) -> int | None:
@@ -154,6 +190,12 @@ def unlock(ws: Workspace) -> str:
                 current['state'] = 'failed'
                 current['finished_at'] = state.now()
                 current.setdefault('error', 'Worker encerrado sem registrar o estado final')
+            statuses = current.get('statuses')
+            if isinstance(statuses, dict):
+                # Nenhuma tarefa continua em andamento depois que o worker morreu.
+                for task_id, status in statuses.items():
+                    if status in state.UNFINISHED_STATUSES:
+                        statuses[task_id] = 'blocked'
             current['unlocked_at'] = state.now()
             current['recovery_required_at_unlock'] = bool(current.get('recovery_required'))
             state.write_json(ws.status(run_id), {**current, 'recovery_required': False})

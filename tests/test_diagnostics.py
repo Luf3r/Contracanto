@@ -1,11 +1,14 @@
 """Diagnóstico e operação: worker morto, conflitos, erros da CLI, comandos órfãos,
 nova tentativa de implementação, preparação do worktree, poda forçada e limite do patch."""
 
+import asyncio
 import json
 import logging
 import os
 import subprocess
 import sys
+import threading
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -22,28 +25,11 @@ ROOT = Path(__file__).resolve().parent.parent
 PASS = [sys.executable, '-c', 'pass']
 
 
-def reserved_repository(test, worker_pid):
-    """Repositório limpo com uma reserva assumida por um worker de PID conhecido."""
-    directory = test.enterContext(support.temp_dir())
-    git = support.init_repository(directory)
-    git('add', '.')
-    git('commit', '-m', 'baseline')
-    ws = st.Workspace.for_root(directory)
-    run_id = st.reservation_id(st.reserve_run(ws))
-    ws.publish_run(run_id)
-    ws.claim(run_id).mkdir()
-    ws.worker_pid(run_id).write_text(str(worker_pid))
-    run = st.RunState(ws.status(run_id), run_id)
-    run.state = 'running'
-    run.save()
-    return ws, run_id
-
-
 class WorkerLivenessTests(unittest.TestCase):
     def test_status_tells_a_live_worker_from_a_dead_one(self):
-        ws, _ = reserved_repository(self, os.getpid())
+        ws, _, _ = support.reserved_repository(self, os.getpid())
         self.assertTrue(maintenance.status_report(ws)['reservation']['worker_alive'])
-        ws, _ = reserved_repository(self, support.finished_process_pid())
+        ws, _, _ = support.reserved_repository(self, support.finished_process_pid())
         report = maintenance.status_report(ws)
         self.assertFalse(report['reservation']['worker_alive'])
         # O estado gravado continua `running`: só a reserva revela que ninguém o atualiza mais.
@@ -66,15 +52,20 @@ class OrphanCommandTests(unittest.TestCase):
             self.assertEqual(list(commands.iterdir()), [])
 
     def test_unlock_refuses_while_a_command_of_the_dead_worker_survives(self):
-        ws, run_id = reserved_repository(self, support.finished_process_pid())
-        options = {'start_new_session': True} if os.name == 'posix' else {}
+        ws, run_id, _ = support.reserved_repository(self, support.finished_process_pid())
         # O filho avisa quando está pronto e termina sozinho ao fim da entrada. Matar o
         # lançador do venv no Windows deixaria o Python real suspenso, segurando a saída.
         code = "import sys; print('ready', flush=True); sys.stdin.read()"
         child = subprocess.Popen(
-            [sys.executable, '-c', code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, **options
+            [sys.executable, '-c', code],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            # No POSIX o comando registrado é líder do próprio grupo, como os do worker.
+            start_new_session=os.name == 'posix',
         )
         try:
+            assert child.stdout is not None
             self.assertEqual(child.stdout.readline().strip(), 'ready')
             ws.commands(run_id).mkdir()
             (ws.commands(run_id) / str(child.pid)).touch()
@@ -161,19 +152,19 @@ class CliErrorTests(unittest.TestCase):
 
 class ConfigLimitTests(unittest.TestCase):
     def read_config(self, **env):
-        code = 'import json; from contracanto import config as c; print(json.dumps([c.IMPLEMENT_RETRIES, c.REVIEW_PATCH_LIMIT]))'
+        code = 'import json; from contracanto import config as c; print(json.dumps([c.AGENT_RETRIES, c.REVIEW_PATCH_LIMIT]))'
         environment = {k: v for k, v in os.environ.items() if not k.startswith('CONTRACANTO_')}
         environment.update(env, PYTHONPATH=str(ROOT))
         return subprocess.run([sys.executable, '-c', code], env=environment, capture_output=True, text=True)
 
     def test_counts_default_and_override(self):
         self.assertEqual(json.loads(self.read_config().stdout), [1, 400_000])
-        result = self.read_config(CONTRACANTO_IMPLEMENT_RETRIES='0', CONTRACANTO_REVIEW_PATCH_LIMIT='1000')
+        result = self.read_config(CONTRACANTO_AGENT_RETRIES='0', CONTRACANTO_REVIEW_PATCH_LIMIT='1000')
         self.assertEqual(json.loads(result.stdout), [0, 1000])
 
     def test_out_of_range_values_name_the_variable(self):
         cases = {
-            'CONTRACANTO_IMPLEMENT_RETRIES': '9',
+            'CONTRACANTO_AGENT_RETRIES': '9',
             'CONTRACANTO_REVIEW_PATCH_LIMIT': 'muito',
             # Abaixo disso o limite interno do agy passaria do próprio tempo total.
             'CONTRACANTO_AGENT_TIMEOUT': '30',
@@ -216,7 +207,7 @@ class ImplementationRetryTests(support.RepositoryTestCase):
             with patch.object(agents, 'run_agy', side_effect=agent):
                 states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, PASS)
             self.assertEqual(states, {'A': 'failed'})
-            self.assertEqual(len(calls), config.IMPLEMENT_RETRIES + 1)
+            self.assertEqual(len(calls), config.AGENT_RETRIES + 1)
             self.assertIn('falha passageira', support.read_status(self.ws)['details']['A']['error'])
 
     def test_uncertain_state_is_never_retried(self):
@@ -324,3 +315,177 @@ class EventLogTests(support.RepositoryTestCase):
         ):
             self.assertIn(expected, text)
         self.assertIn('Execução encerrada: completed', text)
+
+
+class WaitForRunTests(unittest.TestCase):
+    def wait(self, ws, timeout=5):
+        with patch.object(server, 'WORKSPACE', ws), patch.object(server, 'WAIT_POLL_INTERVAL', 0.05):
+            return json.loads(asyncio.run(server.wait_for_run(timeout)))
+
+    def test_returns_at_once_without_a_run_or_with_a_dead_worker(self):
+        with support.temp_workspace() as ws:
+            summary = self.wait(ws)
+            self.assertEqual((summary['reservation_state'], summary['timed_out']), ('none', False))
+        ws, run_id, _ = support.reserved_repository(self, support.finished_process_pid())
+        summary = self.wait(ws)
+        self.assertEqual(summary['run_id'], run_id)
+        self.assertEqual((summary['state'], summary['worker_alive'], summary['timed_out']), ('running', False, False))
+
+    def test_times_out_while_the_worker_is_still_running(self):
+        ws, _, _ = support.reserved_repository(self, os.getpid())
+        started = time.monotonic()
+        summary = self.wait(ws, timeout=1)
+        self.assertTrue(summary['timed_out'])
+        self.assertTrue(summary['worker_alive'])
+        self.assertGreaterEqual(time.monotonic() - started, 1)
+
+    def test_returns_when_the_run_finishes_during_the_wait(self):
+        ws, run_id, _ = support.reserved_repository(self, os.getpid())
+
+        def finish():
+            time.sleep(0.3)
+            run = st.RunState(ws.status(run_id), run_id)
+            run.statuses = {'A': 'failed'}
+            run.details = {'A': {'error': 'x' * 2000, 'review': 'parecer longo'}}
+            run.finish('failed')
+            run.save()
+
+        worker = threading.Thread(target=finish)
+        worker.start()
+        summary = self.wait(ws, timeout=20)
+        worker.join()
+        self.assertEqual((summary['state'], summary['timed_out']), ('failed', False))
+        self.assertEqual(summary['statuses'], {'A': 'failed'})
+        # O resumo corta os erros e deixa pareceres e log para get_run_status.
+        self.assertEqual(len(summary['task_errors']['A']), maintenance.SUMMARY_ERROR_TAIL)
+        self.assertNotIn('parecer longo', json.dumps(summary))
+
+
+class CommandPreflightTests(support.RepositoryTestCase):
+    def test_missing_test_or_setup_command_fails_before_any_agent_call(self):
+        cases = {
+            'Comando de testes': dict(tests=['comando-que-nao-existe']),
+            'Comando de preparação': dict(setup=['x-nao-existe']),
+        }
+        for label, options in cases.items():
+            with self.subTest(label=label), self.repository() as (root, store, base, task, git):
+                called: list[str] = []
+                arguments = dict(tests=PASS, setup=None) | options
+                with (
+                    patch.object(
+                        runner.shutil, 'which', side_effect=lambda name: name if name in ('agy', 'claude') else None
+                    ),
+                    patch.object(agents, 'run_agy', side_effect=called.append),
+                    self.assertRaisesRegex(RuntimeError, label + ' não encontrado'),
+                ):
+                    runner.execute(self.ws, {'tasks': [task]}, 1, 0, arguments['tests'], setup=arguments['setup'])
+                self.assertEqual(called, [])
+                self.assertFalse((store / 'run.lock').exists())
+
+    def test_command_inside_the_repository_is_accepted(self):
+        with self.repository() as (root, store, base, task, git):
+            (root / 'check.cmd').write_text('')
+            with patch.object(runner.shutil, 'which', return_value=None):
+                self.assertEqual(runner.resolve_command(['check.cmd', '-x'], root, 'Comando'), ['check.cmd', '-x'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Só o Windows precisa do caminho completo de um .cmd')
+    def test_windows_script_found_in_path_is_replaced_by_its_full_path(self):
+        with support.temp_dir() as directory:
+            script = directory / 'ferramenta.cmd'
+            script.write_text('@exit /b 0\n')
+            with patch.dict(os.environ, {'PATH': str(directory) + os.pathsep + os.environ['PATH']}):
+                resolved = runner.resolve_command(['ferramenta', 'ci'], directory, 'Comando')
+            self.assertEqual(Path(resolved[0]).resolve(), script.resolve())
+            self.assertEqual(resolved[1:], ['ci'])
+            self.assertEqual(proc.run(resolved, cwd=directory).returncode, 0)
+
+
+class RepairRetryTests(support.RepositoryTestCase):
+    def test_failed_repair_call_is_retried(self):
+        with self.repository() as (root, store, base, task, git):
+            calls = []
+
+            def agent(prompt, wt, stop=None):
+                calls.append(prompt.split('\n', 1)[0][:9])
+                if len(calls) == 2:
+                    raise RuntimeError('agy exited 1: falha passageira')
+                (wt / 'allowed.txt').write_text(str(len(calls)))
+                return 'done'
+
+            verdicts = iter([(False, 'REJECTED\n- falta algo'), (True, 'APPROVED')])
+            with (
+                patch.object(agents, 'run_agy', side_effect=agent),
+                patch.object(agents, 'review', side_effect=lambda *args: next(verdicts)),
+            ):
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 1, PASS)
+            self.assertEqual(states, {'A': 'approved'})
+            # Implementação, correção que falhou e correção repetida.
+            self.assertEqual(len(calls), 3)
+            self.assertEqual((root / 'allowed.txt').read_text(), '3')
+
+
+class CommitMessageTests(unittest.TestCase):
+    def test_subject_carries_the_description_within_the_limit(self):
+        with support.temp_workspace() as ws:
+            ctx = support.context(ws, 'a' * 64)
+            long_task = support.task('T1')
+            long_task['description'] = 'Criar   o endpoint\nde saúde ' + 'x' * 200
+            subject, _, body = agents.commit_message(ctx, long_task).partition('\n\n')
+            self.assertTrue(subject.startswith('T1: Criar o endpoint de saúde x'))
+            self.assertEqual(len(subject), agents.COMMIT_SUBJECT_LENGTH)
+            self.assertTrue(subject.endswith('…'))
+            self.assertIn('aaaaaaaaaaaa', body)
+
+
+class VersionTests(unittest.TestCase):
+    def test_cli_reports_the_package_version(self):
+        import contracanto
+
+        with redirect_stdout(StringIO()) as output, self.assertRaises(SystemExit) as exit:
+            cli.main(['--version'])
+        self.assertEqual(exit.exception.code, 0)
+        self.assertEqual(output.getvalue().strip(), f'contracanto {contracanto.__version__}')
+
+
+class CheckoutStateTests(support.RepositoryTestCase):
+    def test_clean_branch_and_detached_head(self):
+        with self.repository() as (root, store, base, task, git):
+            self.assertEqual(gitops.checkout_state(root), gitops.CheckoutState('refs/heads/main', base, ()))
+            git('switch', '--detach')
+            self.assertEqual(gitops.checkout_state(root), gitops.CheckoutState('HEAD', base, ()))
+
+    def test_paths_cover_edits_renames_untracked_and_conflicts(self):
+        with self.repository() as (root, store, base, task, git):
+            (root / 'kept.txt').write_text('kept\n')
+            git('add', '.')
+            git('commit', '-m', 'more')
+            (root / 'outside.txt').write_text('edited\n')
+            git('mv', 'kept.txt', 'ação nova.txt')
+            (root / 'sem rastreio.txt').write_text('x')
+            current = gitops.checkout_state(root)
+            self.assertEqual(set(current.paths), {'outside.txt', 'ação nova.txt', 'kept.txt', 'sem rastreio.txt'})
+            self.assertEqual(set(gitops.changed_files(root)), set(current.paths))
+
+    def test_unmerged_entry_is_reported(self):
+        with self.repository() as (root, store, base, task, git):
+            git('switch', '-c', 'other')
+            (root / 'outside.txt').write_text('other\n')
+            git('commit', '-am', 'other')
+            git('switch', 'main')
+            (root / 'outside.txt').write_text('main\n')
+            git('commit', '-am', 'main')
+            git('merge', 'other', check=False)
+            self.assertEqual(gitops.checkout_state(root).paths, ('outside.txt',))
+            git('merge', '--abort')
+
+    def test_one_status_call_replaces_three_commands(self):
+        with self.repository() as (root, store, base, task, git):
+            calls = []
+
+            def counting(*args, **kwargs):
+                calls.append(args[0])
+                return git(*args, **kwargs)
+
+            with patch.object(gitops, 'git', side_effect=counting):
+                gitops.check_revision(root, base, 'refs/heads/main')
+            self.assertEqual(calls, ['rev-parse', 'status', 'ls-files'])

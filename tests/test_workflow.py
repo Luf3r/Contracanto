@@ -86,7 +86,11 @@ class WorkflowTests(unittest.TestCase):
                 states = runner.execute(ws, plan, 2, 1, [sys.executable, 'check.py'])
             self.assertEqual(states, {'A': 'approved', 'B': 'approved', 'C': 'approved'})
             self.assertEqual(support.read_status(ws)['state'], 'completed')
-            self.assertIn('revised', git('log', '--oneline').stdout)
+            # Um commit por tarefa, mesmo para a que foi corrigida, com a descrição no assunto.
+            subjects = git('log', '--format=%s').stdout.splitlines()
+            self.assertEqual(len(subjects), 4, subjects)
+            self.assertEqual({subject.split(':')[0] for subject in subjects[:3]}, {'A', 'B', 'C'})
+            self.assertIn('do Contracanto', git('log', '-1', '--format=%b').stdout)
             for name in ('ação espaço.txt', 'B.txt', 'C.txt'):
                 self.assertEqual((root / name).read_text(), 'ok\n')
             self.assertEqual(git('status', '--porcelain').stdout, '')

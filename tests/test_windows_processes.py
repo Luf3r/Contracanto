@@ -56,7 +56,7 @@ class WindowsProcessTests(unittest.TestCase):
             outcome = None
             with patch.object(proc.subprocess, 'run', side_effect=run):
                 try:
-                    proc.run([sys._base_executable, '-c', parent], timeout=0.6)
+                    proc.run([sys._base_executable, '-c', parent], timeout=0.6)  # type: ignore[attr-defined]
                 except Exception as error:
                     outcome = error
             # Also check survivors if the runner returned the wrong exception.

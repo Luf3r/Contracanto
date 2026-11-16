@@ -16,6 +16,10 @@ from contracanto import state as st
 PLAN = json.dumps({'tasks': [dict(id='A', description='Example', deps=[], files=['A.txt'], acceptance=['Tests pass'])]})
 
 
+def fake_git(*args, **kwargs):
+    return subprocess.CompletedProcess(args, 0, support.fake_git_output(args, ''), '')
+
+
 def status_report():
     return json.loads(server.get_run_status())
 
@@ -23,6 +27,7 @@ def status_report():
 class SubmissionTests(unittest.TestCase):
     def test_submit_schema_requires_test_command(self):
         tool = server.mcp._tool_manager.get_tool('submit_plan')
+        assert tool is not None
         self.assertIn('test_command_json', tool.parameters['required'])
 
     def test_invalid_submission_is_reported_without_reserving(self):
@@ -37,7 +42,7 @@ class SubmissionTests(unittest.TestCase):
         for expected, arguments in cases.items():
             with self.subTest(expected=expected), support.temp_workspace(server) as ws:
                 with patch.object(server.subprocess, 'Popen') as launch:
-                    result = server.submit_plan(**arguments)
+                    result = server.submit_plan(**arguments)  # type: ignore[arg-type]
                 self.assertTrue(result.startswith('Erro: '), result)
                 self.assertIn(expected, result)
                 launch.assert_not_called()
@@ -89,7 +94,7 @@ class SubmissionTests(unittest.TestCase):
 
             with (
                 patch.object(runner.shutil, 'which', return_value='tool'),
-                patch.object(gitops, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')),
+                patch.object(gitops, 'git', side_effect=fake_git),
                 patch.object(agents, 'run_executor', side_effect=worker),
                 concurrent.futures.ThreadPoolExecutor(1) as pool,
             ):
@@ -116,7 +121,7 @@ class SubmissionTests(unittest.TestCase):
 
             with (
                 patch.object(runner.shutil, 'which', return_value='tool'),
-                patch.object(gitops, 'git', return_value=subprocess.CompletedProcess([], 0, '', '')),
+                patch.object(gitops, 'git', side_effect=fake_git),
                 patch.object(agents, 'run_executor', side_effect=worker),
             ):
                 runner.execute(ws, json.loads(PLAN), 1, 0, ['test'])

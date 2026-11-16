@@ -65,7 +65,7 @@ class RecoveryInterruptionTests(unittest.TestCase):
                 class FailingPool(concurrent.futures.ThreadPoolExecutor):
                     submissions = 0
 
-                    def submit(self, fn, *args, **kwargs):
+                    def submit(self, fn, *args, **kwargs):  # type: ignore[override]
                         self.submissions += 1
                         if self.submissions == 2:
                             if queued:
@@ -81,7 +81,7 @@ class RecoveryInterruptionTests(unittest.TestCase):
                     raise errors.RecoveryRequired('descendant termination unconfirmed')
 
                 def git(*args, **kwargs):
-                    return subprocess.CompletedProcess(args, 0, 'base' if args[0] == 'rev-parse' else '', '')
+                    return subprocess.CompletedProcess(args, 0, support.fake_git_output(args), '')
 
                 tasks = [
                     dict(id=tid, description='Example', deps=[], files=[tid + '.txt'], acceptance=['Pass'])

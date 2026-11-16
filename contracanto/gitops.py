@@ -127,15 +127,52 @@ def hidden_index_changes(wt: str | Path) -> list[str]:
     return changes
 
 
-def changed_files(wt: str | Path) -> list[str]:
-    """Arquivos alterados; o formato porcelain -z traz nomes crus e, nas renomeações, destino E origem."""
-    records = iter(git_records('status', '--porcelain', ALL_SUBMODULES, '-z', '-uall', cwd=wt))
-    paths = []
+@dataclass(frozen=True)
+class CheckoutState:
+    """Branch, commit e arquivos alterados de um checkout, lidos em uma única chamada ao Git."""
+
+    branch: str
+    head: str
+    paths: tuple[str, ...]
+
+
+# Campos separados por espaço que precedem o caminho em cada tipo de registro do porcelain v2.
+_STATUS_FIELDS = {'1': 8, '2': 9, 'u': 10}
+
+
+def checkout_state(wt: str | Path) -> CheckoutState:
+    """Lê `git status --porcelain=v2 --branch -z`: nomes crus e, nas renomeações, destino E origem.
+
+    `branch` é a ref completa, ou HEAD em um checkout destacado. Uma branch chamada
+    literalmente `(detached)` também é lida como HEAD e nunca confere com a esperada.
+    """
+    records = iter(git_records('status', '--porcelain=v2', '--branch', ALL_SUBMODULES, '-z', '-uall', cwd=wt))
+    branch = head = None
+    paths: list[str] = []
     for record in records:
-        paths.append(record[3:])
-        if 'R' in record[:2] or 'C' in record[:2]:
-            paths.append(next(records))
-    return list(dict.fromkeys([*paths, *hidden_index_changes(wt)]))
+        kind, _, rest = record.partition(' ')
+        if kind == '#':
+            key, _, value = rest.partition(' ')
+            if key == 'branch.oid':
+                head = value
+            elif key == 'branch.head':
+                branch = 'HEAD' if value == '(detached)' else 'refs/heads/' + value
+        elif kind in _STATUS_FIELDS:
+            paths.append(record.split(' ', _STATUS_FIELDS[kind])[-1])
+            if kind == '2':
+                paths.append(next(records))
+        elif kind in ('?', '!'):
+            paths.append(rest)
+        else:
+            raise RuntimeError(f'Saída inesperada do git status: {record[:60]!r}')
+    if branch is None or head is None or head == '(initial)':
+        raise RuntimeError('git status não informou a branch e o commit atuais')
+    return CheckoutState(branch, head, tuple(paths))
+
+
+def changed_files(wt: str | Path) -> list[str]:
+    """Arquivos alterados, inclusive os mascarados por marcas do índice."""
+    return list(dict.fromkeys([*checkout_state(wt).paths, *hidden_index_changes(wt)]))
 
 
 def check_paths_in_scope(task: plan.Task, paths: Iterable[str]) -> None:
@@ -213,11 +250,13 @@ def check_revision(
     error_type = RecoveryRequired if recovery else RuntimeError
     try:
         check_git_operation(wt)
-        branch = branch_ref(wt)
+        current = checkout_state(wt)
+        branch = current.branch
         changed = (
             (expected_branch is not None and branch != expected_branch)
-            or head(wt) != expected_head
-            or changed_files(wt)
+            or current.head != expected_head
+            or bool(current.paths)
+            or bool(hidden_index_changes(wt))
         )
     except (Exception, KeyboardInterrupt) as error:
         if recovery:
@@ -258,7 +297,8 @@ def remove_worktree(root: Path, worktree: str | Path, branch: str | None, force:
 def check_checkout(wt: str | Path, expected_head: str, expected_branch: str | None) -> None:
     """O executor não pode trocar de branch nem criar commits por conta própria."""
     check_git_operation(wt)
-    if branch_ref(wt) != expected_branch or head(wt) != expected_head:
+    current = checkout_state(wt)
+    if current.branch != expected_branch or current.head != expected_head:
         raise RuntimeError('Executor alterou a branch ou HEAD do worktree')
 
 
@@ -272,7 +312,8 @@ class TargetCheckout:
 
     @classmethod
     def current(cls, root: Path) -> TargetCheckout:
-        return cls(root, branch_ref(root), head(root))
+        current = checkout_state(root)
+        return cls(root, current.branch, current.head)
 
     def verify(self) -> None:
         check_revision(self.root, self.head, self.branch, recovery=True)

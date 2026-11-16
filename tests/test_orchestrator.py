@@ -61,7 +61,8 @@ class RegressionTests(unittest.TestCase):
             calls.append(args)
             if args[0] == 'claude':
                 return subprocess.CompletedProcess(args, 0, json.dumps({'result': 'APPROVED', 'is_error': False}), '')
-            return subprocess.CompletedProcess(args, 0, b'' if '--binary' in args else '', '')
+            output = b'' if '--binary' in args else support.fake_git_output(args[1:], 'commit')
+            return subprocess.CompletedProcess(args, 0, output, '')
 
         with patch.object(proc, 'run', side_effect=command):
             agents.review(agents.Artifact(task=task('A'), worktree='.', report='done'), ['python', 'test.py'])
@@ -80,7 +81,7 @@ class RegressionTests(unittest.TestCase):
             if abort_error and args[:2] == ('cherry-pick', '--abort'):
                 raise subprocess.TimeoutExpired(['git', *args], 180)
             failed = (revert_fails and args[0] == 'revert') or (abort_error and args[0] == 'cherry-pick')
-            return subprocess.CompletedProcess(args, int(failed), 'base' if args[0] == 'rev-parse' else '', '')
+            return subprocess.CompletedProcess(args, int(failed), support.fake_git_output(args), '')
 
         def artifact(ctx, t, base, context):
             return agents.Artifact(task=t, commit='commit', worktree='.', report='done')
@@ -99,7 +100,7 @@ class RegressionTests(unittest.TestCase):
                     else {'return_value': subprocess.CompletedProcess([], 0, '', '')},
                 ),
             ]:
-                stack.enter_context(patch.object(module, target, **kwargs))
+                stack.enter_context(patch.object(module, target, **kwargs))  # type: ignore[arg-type]
             stack.enter_context(patch.object(runner.shutil, 'which', return_value='tool'))
             statuses = runner.execute(ws, {'tasks': tasks}, 1, 0, ['test'])
         return statuses, calls

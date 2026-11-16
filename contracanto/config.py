@@ -66,8 +66,9 @@ STOP_POLL_INTERVAL = 0.25
 # O limite interno do agy fica abaixo de AGENT_TIMEOUT para que ele reporte o próprio timeout.
 AGENT_PRINT_TIMEOUT = f'{int(AGENT_TIMEOUT - 100) // 60}m'
 REVIEW_MODEL = _text('REVIEW_MODEL', 'sonnet')
-# Novas chamadas ao agy quando a implementação falha sem deixar o worktree em estado incerto.
-IMPLEMENT_RETRIES = _count('IMPLEMENT_RETRIES', 1, range(4))
+# Novas chamadas ao agy quando uma implementação ou correção falha sem deixar o worktree
+# em estado incerto.
+AGENT_RETRIES = _count('AGENT_RETRIES', 1, range(4))
 # Caracteres do patch aceitos em um pedido de revisão; acima disso a tarefa falha em vez de
 # ser revisada pela metade.
 REVIEW_PATCH_LIMIT = _count('REVIEW_PATCH_LIMIT', 400_000, range(1, 10_000_001))
@@ -83,7 +84,7 @@ TUNABLE = (
     'AGENT_TIMEOUT',
     'REVIEW_TIMEOUT',
     'REVIEW_MODEL',
-    'IMPLEMENT_RETRIES',
+    'AGENT_RETRIES',
     'REVIEW_PATCH_LIMIT',
 )
 

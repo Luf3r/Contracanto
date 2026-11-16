@@ -199,20 +199,7 @@ class ProcessTests(unittest.TestCase):
 
 class UnlockTests(unittest.TestCase):
     def reserved_repository(self, worker_pid):
-        directory = self.enterContext(support.temp_dir())
-        git = support.init_repository(directory)
-        git('add', '.')
-        git('commit', '-m', 'baseline')
-        ws = st.Workspace.for_root(directory)
-        run_id = st.reservation_id(st.reserve_run(ws))
-        ws.publish_run(run_id)
-        ws.claim(run_id).mkdir()
-        ws.worker_pid(run_id).write_text(str(worker_pid))
-        run = st.RunState(ws.status(run_id), run_id)
-        run.state = 'running'
-        run.recovery_required = True
-        run.save()
-        return ws, run_id, git
+        return support.reserved_repository(self, worker_pid, recovery_required=True)
 
     def test_refuses_while_worker_is_alive(self):
         ws, run_id, git = self.reserved_repository(os.getpid())
@@ -237,6 +224,8 @@ class UnlockTests(unittest.TestCase):
         self.assertFalse(ws.lock.exists())
         status = json.loads(ws.status(run_id).read_text())
         self.assertEqual(status['state'], 'failed')
+        # Nenhuma tarefa fica em andamento depois que o worker morreu.
+        self.assertEqual(status['statuses'], {'A': 'blocked', 'B': 'blocked', 'C': 'approved'})
         self.assertFalse(status['recovery_required'])
         self.assertTrue(status['recovery_required_at_unlock'])
         self.assertIn('unlocked_at', status)

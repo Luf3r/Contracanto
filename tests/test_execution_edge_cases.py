@@ -46,7 +46,7 @@ class OperationalTests(unittest.TestCase):
                     raise KeyboardInterrupt
 
                 def git(*args, **kwargs):
-                    return subprocess.CompletedProcess(args, 0, 'base' if args[0] == 'rev-parse' else '', '')
+                    return subprocess.CompletedProcess(args, 0, support.fake_git_output(args), '')
 
                 with (
                     patch.object(gitops, 'git', side_effect=git),
@@ -128,7 +128,7 @@ class OperationalTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, '', '')
 
         def git(*args, **kwargs):
-            output = patch_text if args[0] == 'show' else ('commit' if args[0] == 'rev-parse' else '')
+            output = patch_text if args[0] == 'show' else support.fake_git_output(args, 'commit')
             if '--binary' in args:
                 output = output.encode()
             return subprocess.CompletedProcess(args, 0, output, '')
@@ -183,7 +183,7 @@ class OperationalTests(unittest.TestCase):
                 def git(*args, **kwargs):
                     if args[0] == operation:
                         raise KeyboardInterrupt
-                    return subprocess.CompletedProcess(args, 0, 'base' if args[0] == 'rev-parse' else '', '')
+                    return subprocess.CompletedProcess(args, 0, support.fake_git_output(args), '')
 
                 artifact = agents.Artifact(task=current, commit='commit', worktree='.', report='done')
                 with (
@@ -257,7 +257,7 @@ class OperationalTests(unittest.TestCase):
             )
             (root / r'src\outside').touch()
             with self.assertRaisesRegex(RuntimeError, 'fora do escopo'):
-                gitops.check_scope({'files': ['src'], 'id': 'A'}, root, 'HEAD')
+                gitops.check_scope(task(['src']), root, 'HEAD')
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX process group')
     def test_success_stops_background_process(self):
