@@ -323,7 +323,7 @@ def reserve_run(ws: Workspace) -> str:
     ws.store.mkdir(exist_ok=True)
     try:
         with ws.lock.open('x', encoding='utf-8') as handle:
-            json.dump({'run_id': reservation_id(token), 'pid': os.getpid(), 'supports_stop': True}, handle)
+            json.dump({'run_id': reservation_id(token), 'pid': os.getpid()}, handle)
     except FileExistsError:
         raise RuntimeError(
             'Já existe execução reservada; consulte get_run_status e o procedimento de recuperação'
@@ -358,8 +358,8 @@ def request_stop(ws: Workspace, run_id: str | None = None) -> str:
     active_id = record.get('run_id', '')
     if run_id is not None and run_id != active_id:
         return 'A reserva atual pertence a outra execução.'
-    if not record.get('supports_stop') or not RUN_ID.fullmatch(active_id):
-        return 'Esta reserva não oferece encerramento cooperativo. Consulte o procedimento de recuperação.'
+    if not RUN_ID.fullmatch(active_id):
+        return 'Reserva sem identificador de execução válido. Consulte o procedimento de recuperação.'
     try:
         current = json.loads(ws.status(active_id).read_text(encoding='utf-8'))
     except FileNotFoundError:

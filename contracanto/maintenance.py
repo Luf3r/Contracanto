@@ -28,7 +28,7 @@ def read_reservation(ws: Workspace) -> tuple[str, dict[str, Any] | None]:
     public = {key: record[key] for key in ('run_id', 'pid') if key in record}
     run_id = public.get('run_id')
     if isinstance(run_id, str) and state.RUN_ID.fullmatch(run_id):
-        public['stop_requested'] = bool(record.get('supports_stop')) and ws.stop_file(run_id).is_file()
+        public['stop_requested'] = ws.stop_file(run_id).is_file()
     else:
         public.pop('run_id', None)
     return 'active', public
