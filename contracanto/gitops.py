@@ -233,11 +233,26 @@ def branch_ref(wt: str | Path) -> str:
     return result.stdout.strip()
 
 
+# O diretório Git de um checkout não muda enquanto ele existe.
+_GIT_DIRS: dict[str, Path] = {}
+
+
+def git_dir(wt: str | Path) -> Path:
+    key = os.path.abspath(wt)
+    found = _GIT_DIRS.get(key)
+    if found is None:
+        found = Path(git('rev-parse', '--absolute-git-dir', cwd=wt).stdout.rstrip('\r\n'))
+        # Só um diretório real é lembrado; uma resposta inesperada é consultada de novo.
+        if found.is_absolute() and found.is_dir():
+            _GIT_DIRS[key] = found
+    return found
+
+
 def check_git_operation(wt: str | Path) -> None:
-    git_dir = Path(git('rev-parse', '--absolute-git-dir', cwd=wt).stdout.rstrip('\r\n'))
+    directory = git_dir(wt)
     for marker in PENDING_OPERATION_MARKERS:
         try:
-            (git_dir / marker).stat()
+            (directory / marker).stat()
         except FileNotFoundError:
             continue
         raise RuntimeError(f'Operação Git pendente no worktree: {marker}')
@@ -265,6 +280,25 @@ def check_revision(
     if changed:
         raise error_type('Branch, HEAD ou arquivos do repositório alterados; inspecione as alterações preservadas')
     return branch
+
+
+def is_top_level(root: Path) -> bool:
+    """Se `root` é a raiz do repositório, e não um subdiretório dele."""
+    return not git('rev-parse', '--show-prefix', cwd=root).stdout.strip()
+
+
+def create_branch(root: Path, name: str) -> None:
+    """Cria `name` no commit atual e passa o checkout para ela."""
+    if git('check-ref-format', '--branch', name, cwd=root, check=False).returncode:
+        raise RuntimeError(f'Nome de branch inválido: {name}')
+    created = git('switch', '-c', name, cwd=root, check=False)
+    if created.returncode:
+        raise RuntimeError(f'Não foi possível criar a branch {name}: {created.stderr.strip()[-config.ERROR_TAIL :]}')
+
+
+def contains_commit(root: Path, commit: str) -> bool:
+    """Se `commit` faz parte do histórico do HEAD atual."""
+    return git('merge-base', '--is-ancestor', commit, 'HEAD', cwd=root, check=False).returncode == 0
 
 
 def merge_tree(root: Path, ours: str, theirs: str) -> str:

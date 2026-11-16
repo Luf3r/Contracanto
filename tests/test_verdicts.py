@@ -1,0 +1,79 @@
+"""Interpretação da resposta do revisor e limite do patch enviado a ele."""
+
+import json
+import subprocess
+import unittest
+from unittest.mock import patch
+
+import support
+
+from contracanto import agents, config, gitops
+from contracanto import process as proc
+
+
+class VerdictTests(unittest.TestCase):
+    def test_json_verdict_variants(self):
+        cases = [
+            ('{"verdict": "APPROVED", "summary": "ok", "problems": []}', True),
+            ('{"verdict": "approved"}', True),
+            ('Segue a análise:\n```json\n{"verdict": "APPROVED", "summary": "ok"}\n```', True),
+            ('{"verdict": "REJECTED", "problems": ["falta teste"]}', False),
+            ('{"verdict": "TALVEZ"}', False),
+            ('{"outro": 1} e depois {"verdict": "APPROVED"}', True),
+            ('APPROVED\nTudo certo', True),
+            ('REJECTED\nFalta teste', False),
+            ('Aprovado, parece bom', False),
+            ('', False),
+        ]
+        for response, approved in cases:
+            with self.subTest(response=response):
+                self.assertIs(agents.parse_verdict(response).approved, approved)
+
+    def test_rejection_text_lists_problems_for_the_repair(self):
+        verdict = agents.parse_verdict('{"verdict": "REJECTED", "summary": "Incompleto", "problems": ["a", "b"]}')
+        self.assertEqual(verdict.text, 'REJECTED\nIncompleto\n- a\n- b')
+
+    def test_unrecognized_answer_is_rejected_with_the_raw_answer(self):
+        verdict = agents.parse_verdict('Parece ótimo!')
+        self.assertFalse(verdict.approved)
+        self.assertTrue(verdict.text.startswith('REJECTED\n'))
+        self.assertIn('Parece ótimo!', verdict.text)
+
+    def test_review_requires_passing_tests_even_with_json_approval(self):
+        artifact = agents.Artifact(task=support.task('A'), worktree='.', report='done')
+
+        def command(args, **kwargs):
+            if args[0] == 'claude':
+                return subprocess.CompletedProcess(args, 0, json.dumps({'result': '{"verdict": "APPROVED"}'}), '')
+            return subprocess.CompletedProcess(args, 0, b'' if '--binary' in args else '', '')
+
+        failing = subprocess.CompletedProcess([], 3, 'out', 'err')
+        with (
+            patch.object(proc, 'run', side_effect=command),
+            patch.object(support.gitops, 'run_tests', return_value=failing),
+            patch.object(support.gitops, 'head', return_value='commit'),
+        ):
+            approved, feedback = agents.review(artifact, ['test'])
+        self.assertFalse(approved)
+        self.assertIn('código 3', feedback)
+
+
+class PatchLimitTests(unittest.TestCase):
+    def test_oversized_patch_fails_before_calling_the_reviewer(self):
+        artifact = agents.Artifact(task=support.task('A'), worktree='.', report='done')
+        called = []
+
+        def command(args, **kwargs):
+            called.append(args[0])
+            return subprocess.CompletedProcess(args, 0, b'x' * 50 if '--binary' in args else '', '')
+
+        passing = subprocess.CompletedProcess([], 0, '', '')
+        with (
+            patch.object(proc, 'run', side_effect=command),
+            patch.object(gitops, 'run_tests', return_value=passing),
+            patch.object(gitops, 'head', return_value='commit'),
+            patch.object(config, 'REVIEW_PATCH_LIMIT', 10),
+            self.assertRaisesRegex(RuntimeError, 'REVIEW_PATCH_LIMIT'),
+        ):
+            agents.review(artifact, ['test'])
+        self.assertNotIn('claude', called)

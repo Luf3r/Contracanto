@@ -48,7 +48,7 @@ ignore = [
 "tests/*" = ["B023", "RUF059", "SIM117", "SIM105", "SIM102"]
 
 [tool.mypy]
-files = ["contracanto", "orchestrator.py", "mcp_server.py", "scripts", "tests"]
+files = ["contracanto", "orchestrator.py", "mcp_server.py", "examples", "scripts", "tests"]
 python_version = "3.13"
 check_untyped_defs = true
 warn_unused_ignores = true

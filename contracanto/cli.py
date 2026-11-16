@@ -23,6 +23,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument('--version', action='version', version=f'contracanto {__version__}')
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('plan', type=Path, nargs='?', help='Arquivo JSON do plano a executar')
+    action.add_argument(
+        '--resume',
+        nargs='?',
+        const='',
+        metavar='RUN_ID',
+        help='Executa de novo as tarefas não aprovadas de uma execução encerrada (padrão: a mais recente)',
+    )
     action.add_argument('--stop', action='store_true', help='Solicita o encerramento da execução ativa')
     action.add_argument('--status', action='store_true', help='Mostra o estado da execução ativa ou da mais recente')
     action.add_argument(
@@ -53,6 +60,12 @@ def _parser() -> argparse.ArgumentParser:
         '--keep-worktrees',
         action='store_true',
         help='Preserva worktree e branch das tarefas aprovadas em vez de removê-los após a integração.',
+    )
+    parser.add_argument(
+        '--branch',
+        metavar='NOME',
+        help='Cria esta branch no commit atual e integra nela, em vez de na branch em uso. '
+        'O checkout fica nela ao final.',
     )
     parser.add_argument(
         '--setup-json',
@@ -103,8 +116,12 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace, ws: sta
     try:
         config.check_limits(args.parallel, args.retries)
         setup = parse_command(args.setup_json, '--setup-json') if args.setup_json else None
-        # Um worker lançado pelo MCP só lê o plano depois de assumir a reserva.
-        plan = args.plan if args.reservation else json.loads(args.plan.read_text(encoding='utf-8'))
+        config.check_pinned(args.test, setup)
+        if args.resume is not None:
+            plan = maintenance.resume_plan(ws, args.resume or None)
+        else:
+            # Um worker lançado pelo MCP só lê o plano depois de assumir a reserva.
+            plan = args.plan if args.reservation else json.loads(args.plan.read_text(encoding='utf-8'))
     except OSError as error:
         parser.error(f'Não foi possível ler o plano: {error}')
     except ValueError as error:
@@ -118,6 +135,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace, ws: sta
         reservation=args.reservation,
         keep_worktrees=args.keep_worktrees,
         setup=setup,
+        branch=args.branch,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if any(status != 'approved' for status in result.values()):

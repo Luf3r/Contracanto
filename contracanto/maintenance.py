@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from . import gitops, process, state
+from . import gitops, plan, process, state
 from .state import Workspace
 
 LOG_TAIL = 4000
-SUMMARY_ERROR_TAIL = 500
+SUMMARY_ERROR_LIMIT = 500
 
 
 def read_reservation(ws: Workspace) -> tuple[str, dict[str, Any] | None]:
@@ -91,7 +91,7 @@ def summarize(report: dict[str, Any]) -> dict[str, Any]:
     reservation = report['reservation'] or {}
     details = run.get('details') or {}
     errors = {
-        task_id: str(detail['error'])[:SUMMARY_ERROR_TAIL]
+        task_id: str(detail['error'])[:SUMMARY_ERROR_LIMIT]
         for task_id, detail in details.items()
         if isinstance(detail, dict) and detail.get('error')
     }
@@ -201,6 +201,42 @@ def unlock(ws: Workspace) -> str:
             state.write_json(ws.status(run_id), {**current, 'recovery_required': False})
     state.retry_permission_error(ws.lock.unlink)
     return f'Reserva {run_id or "sem identificador"} removida. Uma nova execução pode ser iniciada.'
+
+
+def resume_plan(ws: Workspace, run_id: str | None = None) -> plan.Plan:
+    """Plano com as tarefas que não foram aprovadas em uma execução encerrada.
+
+    Sem `run_id`, vale a execução mais recente. As dependências já aprovadas saem
+    do plano, então cada uma delas precisa continuar no histórico do HEAD atual.
+    """
+    if run_id is not None and not state.RUN_ID.fullmatch(run_id):
+        raise RuntimeError(f'Identificador de execução inválido: {run_id}')
+    if read_reservation(ws)[0] != 'none':
+        raise RuntimeError('Há uma execução reservada; aguarde o término ou libere a reserva antes de retomar')
+    run_id = run_id or ws.latest_run_id()
+    current = _read_json(ws.status(run_id)) if run_id else None
+    previous = _read_json(ws.plan(run_id)) if run_id else None
+    if run_id is None or current is None or previous is None:
+        raise RuntimeError('Nenhuma execução com plano e estado registrados para retomar')
+    if current.get('state') not in state.TERMINAL_STATES:
+        raise RuntimeError(f'A execução {run_id[:12]} não tem estado final; use --unlock antes de retomar')
+    plan.validate(previous)
+    statuses = current.get('statuses') or {}
+    details = current.get('details') or {}
+    for task in previous['tasks']:
+        task_id = task['id']
+        if statuses.get(task_id) != 'approved':
+            continue
+        commit = (details.get(task_id) or {}).get('integrated_commit')
+        if not commit or not gitops.contains_commit(ws.root, commit):
+            raise RuntimeError(
+                f'A tarefa {task_id} foi aprovada na execução {run_id[:12]}, mas o commit dela não está no '
+                'HEAD atual. Volte para a branch que recebeu a execução ou submeta um plano novo'
+            )
+    pending = plan.remaining(cast(plan.Plan, previous), statuses)
+    if not pending['tasks']:
+        raise RuntimeError(f'Todas as tarefas da execução {run_id[:12]} já foram aprovadas')
+    return pending
 
 
 def prune_runs(ws: Workspace, keep: int, force: bool = False) -> dict[str, Any]:

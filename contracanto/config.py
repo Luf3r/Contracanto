@@ -7,7 +7,9 @@ importar o pacote. O worker lançado pelo MCP herda o ambiente do servidor.
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Sequence
 
 ENV_PREFIX = 'CONTRACANTO_'
 
@@ -50,6 +52,24 @@ def _text(name: str, default: str) -> str:
     return os.environ.get(ENV_PREFIX + name, '').strip() or default
 
 
+def _command(name: str, allow_empty: bool = False) -> list[str] | None:
+    raw = os.environ.get(ENV_PREFIX + name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = None
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(argument, str) for argument in value)
+        or not (value or allow_empty)
+    ):
+        expected = 'uma lista JSON de strings' if allow_empty else 'uma lista JSON não vazia de strings'
+        raise ValueError(f'{ENV_PREFIX}{name} deve ser {expected}, recebido {raw!r}')
+    return value
+
+
 # Segundos.
 # Limite de um comando chamado sem tempo próprio; todos os do pacote informam o seu.
 COMMAND_TIMEOUT = 1800
@@ -73,6 +93,12 @@ AGENT_RETRIES = _count('AGENT_RETRIES', 1, range(4))
 # ser revisada pela metade.
 REVIEW_PATCH_LIMIT = _count('REVIEW_PATCH_LIMIT', 400_000, range(1, 10_000_001))
 
+# Comandos fixados pelo operador. Com TEST_COMMAND definido, só esse comando de testes é
+# aceito. Com SETUP_COMMAND definido, a preparação informada precisa ser igual a ele; a
+# lista vazia proíbe qualquer preparação. Sem as variáveis, vale o que quem submete escolher.
+TEST_COMMAND = _command('TEST_COMMAND')
+SETUP_COMMAND = _command('SETUP_COMMAND', allow_empty=True)
+
 # Caudas preservadas em mensagens e no pedido de revisão.
 ERROR_TAIL = 2000
 TEST_OUTPUT_TAIL = 10000
@@ -86,9 +112,27 @@ TUNABLE = (
     'REVIEW_MODEL',
     'AGENT_RETRIES',
     'REVIEW_PATCH_LIMIT',
+    'TEST_COMMAND',
+    'SETUP_COMMAND',
 )
 
 
 def check_limits(parallel: int, retries: int) -> None:
     if parallel not in PARALLEL_RANGE or retries not in RETRY_RANGE:
         raise ValueError('parallel deve ser 1..8, retries 0..3')
+
+
+def check_pinned(test: Sequence[str] | None, setup: Sequence[str] | None) -> None:
+    """Recusa comandos diferentes dos fixados pelo operador nas variáveis de ambiente."""
+    if TEST_COMMAND is not None and list(test or []) != TEST_COMMAND:
+        raise ValueError(
+            f'O operador fixou o comando de testes em {ENV_PREFIX}TEST_COMMAND; '
+            f'use exatamente {json.dumps(TEST_COMMAND, ensure_ascii=False)}'
+        )
+    if SETUP_COMMAND is not None and setup is not None and list(setup) != SETUP_COMMAND:
+        if not SETUP_COMMAND:
+            raise ValueError(f'O operador não permite comando de preparação ({ENV_PREFIX}SETUP_COMMAND vazio)')
+        raise ValueError(
+            f'O operador fixou o comando de preparação em {ENV_PREFIX}SETUP_COMMAND; '
+            f'omita-o ou use exatamente {json.dumps(SETUP_COMMAND, ensure_ascii=False)}'
+        )

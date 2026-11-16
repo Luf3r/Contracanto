@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, NotRequired, TypedDict
 
 from . import config
@@ -104,3 +104,15 @@ def validate(plan: Any) -> None:
     for task in tasks:
         _check_task(task, known_ids)
     _check_acyclic(tasks)
+
+
+def remaining(plan: Plan, statuses: Mapping[str, str]) -> Plan:
+    """O plano sem as tarefas já aprovadas; as dependências delas deixam de ser exigidas."""
+    done = {task_id for task_id, status in statuses.items() if status == 'approved'}
+    tasks: list[Task] = []
+    for task in plan['tasks']:
+        if task['id'] not in done:
+            pending = dict(task, deps=[dep for dep in task['deps'] if dep not in done])
+            tasks.append(pending)  # type: ignore[arg-type]
+    result = dict(plan, tasks=tasks)
+    return result  # type: ignore[return-value]

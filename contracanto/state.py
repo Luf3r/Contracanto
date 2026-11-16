@@ -193,6 +193,8 @@ class RunState:
         self.timings: dict[str, dict[str, Any]] = {}
         self.recovery_required = False
         self.error: str | None = None
+        # Branch de destino e commit sobre o qual a execução começou.
+        self.target: dict[str, str] | None = None
         self.started_at = now()
         self.finished_at: str | None = None
         self._started = time.monotonic()
@@ -215,6 +217,8 @@ class RunState:
             }
             if self.error is not None:
                 data['error'] = self.error
+            if self.target is not None:
+                data['target'] = self.target
             # Uma cópia independente: a gravação não pode observar uma alteração pela metade.
             return json.loads(json.dumps(data))
 
@@ -291,13 +295,20 @@ class RunContext:
     keep_worktrees: bool = False
     # Comando que prepara cada worktree (dependências, por exemplo) antes da implementação.
     setup: Sequence[str] | None = None
+    # Branch nova, criada no início, que recebe os commits em vez da branch em uso.
+    branch: str | None = None
 
     @classmethod
     def open(
-        cls, ws: Workspace, run_id: str, keep_worktrees: bool = False, setup: Sequence[str] | None = None
+        cls,
+        ws: Workspace,
+        run_id: str,
+        keep_worktrees: bool = False,
+        setup: Sequence[str] | None = None,
+        branch: str | None = None,
     ) -> RunContext:
         stop = StopSignal(ws.stop_file(run_id), ws.commands(run_id))
-        return cls(ws, run_id, RunState(ws.status(run_id), run_id), stop, keep_worktrees, setup)
+        return cls(ws, run_id, RunState(ws.status(run_id), run_id), stop, keep_worktrees, setup, branch)
 
     @property
     def root(self) -> Path:

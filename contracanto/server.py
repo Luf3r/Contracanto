@@ -26,19 +26,26 @@ WAIT_LIMIT = 600
 WAIT_POLL_INTERVAL = 1.0
 
 
+def _parse_options(
+    parallel: int, retries: int, test_command_json: str, setup_command_json: str = ''
+) -> tuple[list[str], list[str] | None]:
+    """Valida limites e comandos; ValueError descreve o problema para quem submeteu."""
+    config.check_limits(parallel, retries)
+    test = parse_command(test_command_json, 'test_command_json')
+    setup = parse_command(setup_command_json, 'setup_command_json') if setup_command_json.strip() else None
+    config.check_pinned(test, setup)
+    return test, setup
+
+
 def _parse_submission(
     plan_json: str, parallel: int, retries: int, test_command_json: str, setup_command_json: str = ''
 ) -> tuple[Any, list[str], list[str] | None]:
-    """Valida a entrada; ValueError descreve o problema para quem submeteu."""
     try:
         plan = json.loads(plan_json)
     except json.JSONDecodeError as error:
         raise ValueError(f'plan_json não é JSON válido: {error}') from error
     validate(plan)
-    config.check_limits(parallel, retries)
-    test = parse_command(test_command_json, 'test_command_json')
-    setup = parse_command(setup_command_json, 'setup_command_json') if setup_command_json.strip() else None
-    return plan, test, setup
+    return plan, *_parse_options(parallel, retries, test_command_json, setup_command_json)
 
 
 def worker_argv(
@@ -50,6 +57,7 @@ def worker_argv(
     keep_worktrees: bool,
     test: list[str],
     setup: list[str] | None = None,
+    branch: str | None = None,
 ) -> list[str]:
     return [
         sys.executable,
@@ -60,6 +68,7 @@ def worker_argv(
         str(ws.root),
         *(['--keep-worktrees'] if keep_worktrees else []),
         *(['--setup-json', json.dumps(setup)] if setup else []),
+        *(['--branch', branch] if branch else []),
         '--parallel',
         str(parallel),
         '--retries',
@@ -84,6 +93,7 @@ def submit_plan(
     retries: int = 2,
     keep_worktrees: bool = False,
     setup_command_json: str = '',
+    branch: str = '',
     *,
     test_command_json: str,
 ) -> str:
@@ -95,17 +105,37 @@ def submit_plan(
     setup_command_json: opcional; lista JSON de argumentos de um comando executado em cada
     worktree antes da implementação, ex. ["npm","ci"], para instalar o que o Git ignora.
     Só pode criar arquivos ignorados pelo Git e é tão confiável quanto o comando de teste.
+    branch: opcional; nome de uma branch nova, criada no commit atual, que recebe os commits
+    aprovados em vez da branch em uso. O checkout do repositório fica nela ao final.
+    O operador pode fixar os comandos aceitos (CONTRACANTO_TEST_COMMAND e
+    CONTRACANTO_SETUP_COMMAND); um comando diferente é recusado com o valor esperado.
     Forneça somente projetos, planos e comandos de teste confiáveis. O comando e o código
     testado rodam com as permissões locais do worker antes da revisão e após a integração.
     Podem acessar arquivos fora do worktree, credenciais e rede, inclusive para push ou deploy.
     Entrada inválida ou execução já reservada retornam um texto iniciado por "Erro:" sem
     iniciar nada. Falhas ao lançar o worker são reportadas como erro da ferramenta.
     """
-    ws = WORKSPACE
     try:
         plan, test, setup = _parse_submission(plan_json, parallel, retries, test_command_json, setup_command_json)
+    except ValueError as error:
+        return f'Erro: {error}'
+    return _launch(plan, parallel, retries, keep_worktrees, test, setup, branch)
+
+
+def _launch(
+    plan: Any,
+    parallel: int,
+    retries: int,
+    keep_worktrees: bool,
+    test: list[str],
+    setup: list[str] | None,
+    branch: str,
+) -> str:
+    """Reserva a execução e lança o worker destacado para um plano já validado."""
+    ws = WORKSPACE
+    try:
         token = state.reserve_run(ws)
-    except (ValueError, RuntimeError) as error:
+    except RuntimeError as error:
         return f'Erro: {error}'
     run_id = state.reservation_id(token)
     run = state.RunState(ws.status(run_id), run_id)
@@ -113,7 +143,7 @@ def submit_plan(
         # A partir daqui as consultas mostram esta execução, não a anterior.
         ws.publish_run(run_id)
         state.write_json(ws.plan(run_id), plan)
-        argv = worker_argv(ws, run_id, token, parallel, retries, keep_worktrees, test, setup)
+        argv = worker_argv(ws, run_id, token, parallel, retries, keep_worktrees, test, setup, branch.strip() or None)
         run.save()
         with ws.log(run_id).open('w', encoding='utf-8') as log:
             proc = subprocess.Popen(
@@ -147,6 +177,32 @@ def submit_plan(
             f'O arquivo pode estar ausente ou desatualizado; use o PID {proc.pid} desta resposta para inspeção.'
         )
     return message
+
+
+@mcp.tool()
+def resume_run(
+    parallel: int = 3,
+    retries: int = 2,
+    keep_worktrees: bool = False,
+    setup_command_json: str = '',
+    branch: str = '',
+    run_id: str = '',
+    *,
+    test_command_json: str,
+) -> str:
+    """INICIA uma nova execução só com as tarefas não aprovadas de uma execução encerrada.
+
+    run_id: execução de origem; vazio usa a mais recente. As tarefas aprovadas nela saem do
+    plano e deixam de ser exigidas como dependência, por isso os commits delas precisam estar
+    no HEAD atual do repositório. Os demais parâmetros e avisos são os de submit_plan.
+    Retorna um texto iniciado por "Erro:" quando não há o que retomar.
+    """
+    try:
+        test, setup = _parse_options(parallel, retries, test_command_json, setup_command_json)
+        plan = maintenance.resume_plan(WORKSPACE, run_id.strip() or None)
+    except (ValueError, RuntimeError) as error:
+        return f'Erro: {error}'
+    return _launch(plan, parallel, retries, keep_worktrees, test, setup, branch)
 
 
 @mcp.tool()

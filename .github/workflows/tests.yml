@@ -18,6 +18,7 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: requirements.lock.txt
+      - run: python scripts/check_lock.py
       - run: python -m pip install -r requirements.lock.txt
       - run: python -m pip check
       # O lock já instalou as dependências; aqui entram o pacote e as ferramentas do extra dev.

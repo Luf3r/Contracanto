@@ -153,10 +153,11 @@ class IntegrationGateTests(support.RepositoryTestCase):
                     st.reserve_run(self.ws)
 
     def test_git_inspection_failure_after_tests_preserves_history_and_reservation(self):
-        for inspection in ('rev-parse', 'status'):
+        # Com e sem um commit criado pelos próprios testes de integração.
+        for commits in (True, False):
             for exit_code in (0, 1):
                 with (
-                    self.subTest(inspection=inspection, exit_code=exit_code),
+                    self.subTest(commits=commits, exit_code=exit_code),
                     self.repository() as (root, store, base, task, git),
                 ):
                     marker = store / 'test-mutated-repository'
@@ -167,7 +168,7 @@ class IntegrationGateTests(support.RepositoryTestCase):
                         + (
                             " subprocess.run(['git','add','outside.txt'],check=True)\n"
                             " subprocess.run(['git','commit','-m','test commit'],check=True)\n"
-                            if inspection == 'rev-parse'
+                            if commits
                             else ''
                         )
                         + " Path('.agent-runs/test-mutated-repository').write_text('ready')\n"
@@ -177,7 +178,7 @@ class IntegrationGateTests(support.RepositoryTestCase):
 
                     def unreliable_git(*args, **kwargs):
                         nonlocal failed
-                        if args[0] == inspection and marker.exists() and not failed:
+                        if args[0] == 'status' and marker.exists() and not failed:
                             failed = True
                             raise RuntimeError('Git inspection unavailable')
                         return git(*args, **kwargs)
@@ -350,12 +351,51 @@ class IntegrationGateTests(support.RepositoryTestCase):
             self.assertTrue(Path(state['details']['A']['worktree']).exists())
             self.assertFalse((store / 'run.lock').exists())
 
-    def test_unchanged_detached_head_can_integrate(self):
+    def test_detached_head_is_refused_before_any_agent_call(self):
         with self.repository() as (root, store, base, task, git):
             git('switch', '--detach')
-            states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
-            self.assertEqual(states, {'A': 'approved'})
-            self.assertEqual(git('branch', '--show-current').stdout.strip(), '')
-            self.assertEqual(git('rev-parse', 'main').stdout.strip(), base)
-            self.assertTrue((root / 'allowed.txt').exists())
+            with (
+                patch.object(agents, 'run_agy') as agent,
+                self.assertRaisesRegex(RuntimeError, 'HEAD destacado'),
+            ):
+                runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+            agent.assert_not_called()
+            self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
             self.assertFalse((store / 'run.lock').exists())
+
+    def test_integration_branch_receives_the_commits_and_spares_the_current_one(self):
+        for start in ((), ('switch', '--detach')):
+            with self.subTest(start=start), self.repository() as (root, store, base, task, git):
+                if start:
+                    git(*start)
+                states = runner.execute(
+                    self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'], branch='contracanto/lote'
+                )
+                self.assertEqual(states, {'A': 'approved'})
+                self.assertEqual(git('branch', '--show-current').stdout.strip(), 'contracanto/lote')
+                self.assertEqual(git('rev-parse', 'main').stdout.strip(), base)
+                self.assertTrue((root / 'allowed.txt').exists())
+                status = support.read_status(self.ws)
+                self.assertEqual(status['target'], {'branch': 'refs/heads/contracanto/lote', 'base': base})
+                self.assertFalse((store / 'run.lock').exists())
+
+    def test_invalid_or_existing_integration_branch_fails_the_preflight(self):
+        for name, expected in (('nome inválido..', 'inválido'), ('main', 'Não foi possível criar')):
+            with self.subTest(name=name), self.repository() as (root, store, base, task, git):
+                with patch.object(agents, 'run_agy') as agent, self.assertRaisesRegex(RuntimeError, expected):
+                    runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'], branch=name)
+                agent.assert_not_called()
+                self.assertEqual(git('branch', '--show-current').stdout.strip(), 'main')
+                self.assertFalse((store / 'run.lock').exists())
+
+    def test_subdirectory_of_a_repository_is_refused(self):
+        with self.repository() as (root, store, base, task, git):
+            (root / 'pacote').mkdir()
+            (root / 'pacote' / '.gitignore').write_text('.agent-runs/\n')
+            git('add', '.')
+            git('commit', '-m', 'subdiretório')
+            inner = st.Workspace.for_root(root / 'pacote')
+            with patch.object(agents, 'run_agy') as agent, self.assertRaisesRegex(RuntimeError, 'subdiretório'):
+                runner.execute(inner, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+            agent.assert_not_called()
+            self.assertFalse(inner.lock.exists())

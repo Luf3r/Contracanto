@@ -6,7 +6,7 @@ Se você chegou aqui por causa de uma execução travada, vá direto para [Após
 
 ## Acompanhar uma execução
 
-`wait_for_run(timeout_seconds)` espera a execução terminar e devolve um resumo. `get_run_status()` e `py orchestrator.py --status` devolvem o relatório completo.
+`wait_for_run(timeout_seconds)` espera a execução terminar e devolve um resumo. `get_run_status()` e `contracanto --status` devolvem o relatório completo.
 
 O relatório completo é um objeto JSON com quatro campos:
 
@@ -37,6 +37,7 @@ Além de `state`, `run_id`, `statuses`, `details`, `recovery_required` e `error`
 
 - `started_at`, `updated_at` e `finished_at`: horários em ISO 8601, UTC; `finished_at` é `null` até o estado final.
 - `duration_seconds`: duração da execução até a última gravação ou até o estado final.
+- `target`: a `branch` de destino (ref completa) e o commit `base` sobre o qual a execução começou; ausente quando a preparação falha antes disso.
 - `timings.<id>`: `started_at` e `finished_at` da tarefa e, em `phases`, os segundos acumulados e o número de vezes de cada fase (`implementation`, `review`, `repair`, `integration`). Uma tarefa bloqueada antes de começar não tem `started_at`.
 
 ### Detalhes de cada tarefa
@@ -54,7 +55,7 @@ O commit integrado leva no assunto o identificador e a descrição da tarefa, e 
 
 ## Encerrar uma execução
 
-Pelo MCP, chame `stop_run()`. Você também pode passar o `run_id` obtido no status para selecionar uma execução específica. Pelo terminal, execute `py orchestrator.py --stop` (com o mesmo `--repo`, se usado) em outra janela. As duas formas servem para planos iniciados pela CLI ou pelo MCP.
+Pelo MCP, chame `stop_run()`. Você também pode passar o `run_id` obtido no status para selecionar uma execução específica. Pelo terminal, execute `contracanto --stop` (com o mesmo `--repo`, se usado) em outra janela. As duas formas servem para planos iniciados pela CLI ou pelo MCP.
 
 O pedido retorna imediatamente. No status, `reservation.stop_requested` fica `true` enquanto o worker encerra os comandos de modelo e de testes. O que acontece em seguida:
 
@@ -137,9 +138,11 @@ Nesses casos nenhuma outra tarefa integra. Consulte o erro e `git status` antes 
 
 1. **Veja o que aconteceu.** Leia `run.log`, `status.json` e `pid.txt` em `.agent-runs/runs/<run_id>/`; o `run_id` está em `.agent-runs/run.lock`. Se a submissão avisou que não conseguiu gravar `pid.txt`, use o PID informado na resposta do MCP. A reserva também registra o PID do processo que a criou, que no MCP é o servidor.
 2. **Confirme que nada mais está rodando.** No Gerenciador de Tarefas (ou com `ps`), confira que o worker e seus subprocessos terminaram.
-3. **Inspecione o Git.** Use `git status`, `git log -5 --oneline` e `git worktree list`. Preserve alterações e resolva operações Git pendentes antes de começar outra execução. Não há retomada automática.
-4. **Libere a reserva** com `py orchestrator.py --unlock`.
-5. **Corrija a causa**, confira a branch e o Git limpo, ajuste o plano se necessário e submeta novamente.
+3. **Inspecione o Git.** Use `git status`, `git log -5 --oneline` e `git worktree list`. Preserve alterações e resolva operações Git pendentes antes de começar outra execução. Nada é retomado sozinho.
+4. **Libere a reserva** com `contracanto --unlock`.
+5. **Corrija a causa**, confira a branch e o Git limpo e então submeta um plano novo ou refaça só o que faltou com `contracanto --resume --test ...` (ou `resume_run` pelo MCP).
+
+A retomada cria uma execução nova com as tarefas que não estavam `approved`. Ela confia no estado gravado: se o worker morreu entre o cherry-pick e a aprovação de uma tarefa, o commit dela pode estar na branch com a tarefa marcada como `blocked`. Confira `details.<id>.integrated_commit` e `git log` no passo 3 e desfaça esse commit, ou retire a tarefa submetendo um plano novo, antes de retomar.
 
 O `--unlock` recusa, com código de saída 1, em qualquer destes casos:
 
@@ -152,7 +155,7 @@ Ao liberar, ele marca a execução como `failed` se ela não tinha estado final,
 
 ## Limpar execuções antigas
 
-`py orchestrator.py --prune-runs N` remove os registros das execuções encerradas, com seus worktrees e branches `agent/*`, mantendo as N mais recentes. Nunca remove a execução reservada, uma sem estado final ou uma com recuperação pendente.
+`contracanto --prune-runs N` remove os registros das execuções encerradas, com seus worktrees e branches `agent/*`, mantendo as N mais recentes. Nunca remove a execução reservada, uma sem estado final ou uma com recuperação pendente.
 
 Uma execução cujo worktree tem alterações não salvas, como costuma acontecer quando a tarefa falha, é mantida. Depois de inspecioná-la, acrescente `--force` para descartar essas alterações.
 
@@ -163,6 +166,9 @@ Para liberar um único worktree, use `git worktree remove "CAMINHO_EXATO"`. O Gi
 | Sintoma | O que conferir |
 | --- | --- |
 | `not a git repository` | Execute na raiz Git, com um commit inicial |
+| `é um subdiretório do repositório Git` | Informe em `--repo` ou `CONTRACANTO_REPO` a raiz do repositório |
+| `HEAD destacado` | Faça checkout de uma branch ou informe `--branch NOME` |
+| `O operador fixou o comando` | Use o comando mostrado no erro, definido em `CONTRACANTO_TEST_COMMAND` ou `CONTRACANTO_SETUP_COMMAND` |
 | `Instale/autentique agy e claude` | O PATH do processo MCP |
 | `Comando de testes não encontrado` ou `Comando de preparação não encontrado` | O nome do executável e o PATH do worker |
 | Nenhum estado gerado | O log do MCP; falhas antes do primeiro estado aparecem ali |

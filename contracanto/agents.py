@@ -221,7 +221,7 @@ def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifa
     gitops.check_checkout(wt, base, branch)
     gitops.check_scope(task, wt, base)
     if not gitops.changed_files(wt):
-        raise RuntimeError(f'Gemini não alterou arquivos em {task["id"]}')
+        raise RuntimeError(f'O executor não alterou arquivos em {task["id"]}')
     gitops.commit_all(wt, commit_message(ctx, task))
     return Artifact(task=task, worktree=str(wt), report=report, commit=gitops.head(wt), branch=branch, context=context)
 

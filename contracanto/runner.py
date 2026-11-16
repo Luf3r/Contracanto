@@ -63,6 +63,7 @@ def execute(
     reservation: str | None = None,
     keep_worktrees: bool = False,
     setup: Sequence[str] | None = None,
+    branch: str | None = None,
 ) -> dict[str, TaskStatus]:
     """Assume a reserva, executa o plano e grava o estado final.
 
@@ -85,7 +86,7 @@ def execute(
     # Diagnóstico para --unlock; a execução não depende dele.
     with contextlib.suppress(OSError):
         ws.worker_pid(run_id).write_text(str(os.getpid()), encoding='utf-8')
-    ctx = RunContext.open(ws, run_id, keep_worktrees, setup)
+    ctx = RunContext.open(ws, run_id, keep_worktrees, setup, branch)
     run = ctx.state
     keep_lock = False
     try:
@@ -125,14 +126,26 @@ def _execute(
     config.check_limits(max_workers, retries)
     if not tests:
         raise RuntimeError('Configure um comando de testes via --test (obrigatório)')
+    config.check_pinned(tests, ctx.setup)
     if not shutil.which('agy') or not shutil.which('claude'):
         raise RuntimeError('Instale/autentique agy e claude; ambos devem estar no PATH')
     tests = resolve_command(tests, ctx.root, 'Comando de testes')
     if ctx.setup:
         ctx.setup = resolve_command(ctx.setup, ctx.root, 'Comando de preparação')
+    if not gitops.is_top_level(ctx.root):
+        raise RuntimeError(f'{ctx.root} é um subdiretório do repositório Git; informe a raiz dele')
     if gitops.changed_files(ctx.root):
         raise RuntimeError('Repositório precisa estar limpo antes de executar')
+    if ctx.branch:
+        gitops.create_branch(ctx.root, ctx.branch)
+        log.info('Branch de integração criada: %s', ctx.branch)
     target = TargetCheckout.current(ctx.root)
+    if target.branch == 'HEAD':
+        raise RuntimeError(
+            'HEAD destacado: os commits integrados ficariam fora de qualquer branch. '
+            'Faça checkout de uma branch ou informe uma branch de integração (--branch)'
+        )
+    ctx.state.target = {'branch': target.branch, 'base': target.head}
     try:
         return _run_tasks(ctx, plan, max_workers, retries, tests, target)
     except RecoveryRequired:

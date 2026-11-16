@@ -144,7 +144,7 @@ def fake_git_output(args, head='base'):
     if args[0] == 'symbolic-ref':
         return 'refs/heads/main'
     if args[0] == 'rev-parse':
-        return head
+        return '' if '--show-prefix' in args else head
     return ''
 
 
