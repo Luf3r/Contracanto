@@ -42,9 +42,12 @@ class SafetyGateTests(unittest.TestCase):
             details = support.read_status(self.ws)['details']
             self.assertIn('new/b.txt', details['B']['error'])
             self.assertEqual(details['A']['integrated_commit'], git('rev-parse', 'HEAD').stdout.strip())
-            candidate = git('rev-parse', 'HEAD', cwd=details['A']['worktree']).stdout.strip()
-            self.assertEqual(details['A']['commit'], candidate)
-            self.assertNotEqual(details['A']['integrated_commit'], candidate)
+            self.assertNotEqual(details['A']['integrated_commit'], details['A']['commit'])
+            # A tarefa integrada não deixa worktree nem branch; a que falhou fica para inspeção.
+            self.assertTrue(details['A']['worktree_removed'])
+            self.assertFalse(Path(details['A']['worktree']).exists())
+            self.assertTrue(Path(details['B']['worktree']).exists())
+            self.assertEqual(len(git('branch', '--format=%(refname)', '--list', 'agent/*').stdout.split()), 1)
             self.assertFalse((root / 'new/b.txt').exists())
             self.assertTrue((root / 'new/a.txt').is_file())
 
@@ -635,6 +638,37 @@ class SafetyGateTests(unittest.TestCase):
             self.assertTrue((store / 'run.lock').exists())
             self.assertTrue(support.read_status(self.ws)['recovery_required'])
             self.assertNotIn('Revert', git('log', '--all', '--format=%s').stdout)
+
+    def test_approved_worktree_is_removed_unless_kept(self):
+        for keep in (False, True):
+            with self.subTest(keep=keep), self.repository() as (root, store, base, task, git):
+                states = runner.execute(
+                    self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'], keep_worktrees=keep
+                )
+                self.assertEqual(states, {'A': 'approved'})
+                details = support.read_status(self.ws)['details']['A']
+                self.assertEqual(Path(details['worktree']).exists(), keep)
+                self.assertEqual(bool(git('branch', '--format=%(refname)', '--list', 'agent/*').stdout.strip()), keep)
+                self.assertEqual(details.get('worktree_removed', False), not keep)
+                self.assertNotIn('cleanup_error', details)
+                self.assertEqual(git('status', '--porcelain').stdout, '')
+
+    def test_failed_worktree_cleanup_does_not_fail_an_integrated_task(self):
+        with self.repository() as (root, store, base, task, git):
+
+            def locked_worktree(*args, **kwargs):
+                if args[:2] == ('worktree', 'remove') and '--force' not in args:
+                    raise RuntimeError('worktree in use')
+                return git(*args, **kwargs)
+
+            with patch.object(gitops, 'git', side_effect=locked_worktree):
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+            self.assertEqual(states, {'A': 'approved'})
+            state = support.read_status(self.ws)
+            self.assertEqual(state['state'], 'completed')
+            self.assertIn('worktree in use', state['details']['A']['cleanup_error'])
+            self.assertTrue(Path(state['details']['A']['worktree']).exists())
+            self.assertFalse((store / 'run.lock').exists())
 
     def test_unchanged_detached_head_can_integrate(self):
         with self.repository() as (root, store, base, task, git):

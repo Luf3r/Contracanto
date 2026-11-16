@@ -9,6 +9,7 @@ import support
 
 from contracanto import agents, cli, gitops, runner
 from contracanto import process as proc
+from contracanto import state as st
 from contracanto.plan import validate
 
 
@@ -30,6 +31,28 @@ class RegressionTests(unittest.TestCase):
             with patch.object(runner, 'execute', return_value={'A': 'approved'}) as execute:
                 cli.main([str(plan), '--test', 'py', '-m', 'pytest'])
             self.assertEqual(execute.call_args.args[4], ['py', '-m', 'pytest'])
+
+    def test_target_repository_comes_from_option_then_environment(self):
+        with support.temp_dir() as directory:
+            chosen = directory / 'chosen'
+            from_env = directory / 'from-env'
+            chosen.mkdir()
+            from_env.mkdir()
+            with patch.dict(st.os.environ, {st.REPO_ENV: str(from_env)}):
+                self.assertEqual(st.default_workspace().root, from_env.resolve())
+                self.assertEqual(st.default_workspace(chosen).root, chosen.resolve())
+                self.assertEqual(st.default_workspace(chosen).store, chosen.resolve() / '.agent-runs')
+            with self.assertRaisesRegex(ValueError, 'não encontrado'):
+                st.default_workspace(directory / 'missing')
+
+    def test_cli_forwards_repository_and_worktree_options(self):
+        with support.temp_dir() as directory:
+            plan = directory / 'plan.json'
+            plan.write_text(json.dumps({'tasks': [task('A')]}))
+            with patch.object(runner, 'execute', return_value={'A': 'approved'}) as execute:
+                cli.main([str(plan), '--repo', str(directory), '--keep-worktrees', '--test', 'py'])
+            self.assertEqual(execute.call_args.args[0].root, directory.resolve())
+            self.assertTrue(execute.call_args.kwargs['keep_worktrees'])
 
     def test_review_selects_sonnet_explicitly(self):
         calls = []

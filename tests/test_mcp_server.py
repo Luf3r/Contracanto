@@ -150,6 +150,9 @@ class SubmissionTests(unittest.TestCase):
             source = ws.plan(public_id)
             missing = ws.store / 'missing.json'
             self.assertEqual(argv[0], str(source))
+            # O worker recebe o repositório explicitamente, sem depender de onde foi instalado.
+            self.assertEqual(argv[argv.index('--repo') + 1], str(ws.root))
+            self.assertNotIn('--keep-worktrees', argv)
 
             def attempt(token, path):
                 with self.assertRaises(RuntimeError):

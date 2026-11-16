@@ -39,10 +39,14 @@ def _parse_submission(plan_json: str, parallel: int, retries: int, test_command_
 
 
 @mcp.tool()
-def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, *, test_command_json: str) -> str:
+def submit_plan(
+    plan_json: str, parallel: int = 3, retries: int = 2, keep_worktrees: bool = False, *, test_command_json: str
+) -> str:
     """Recebe um plano criado pelo Claude e INICIA sua execução local em segundo plano.
     plan_json: objeto JSON com goal e tasks [{id,description,deps,files,acceptance}].
     test_command_json: lista JSON de argumentos do comando de teste, ex. ["python","-m","pytest"].
+    keep_worktrees: preserva worktree e branch das tarefas aprovadas; por padrão são removidos
+    após a integração. Os de tarefas que falharam sempre ficam para inspeção.
     Forneça somente projetos, planos e comandos de teste confiáveis. O comando e o código
     testado rodam com as permissões locais do worker antes da revisão e após a integração.
     Podem acessar arquivos fora do worktree, credenciais e rede, inclusive para push ou deploy.
@@ -65,6 +69,9 @@ def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, *, test_com
             sys.executable,
             str(WORKER_SCRIPT),
             str(ws.plan(run_id)),
+            '--repo',
+            str(ws.root),
+            *(['--keep-worktrees'] if keep_worktrees else []),
             '--parallel',
             str(parallel),
             '--retries',

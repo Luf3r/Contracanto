@@ -23,6 +23,7 @@ def execute(
     retries: int,
     tests: Sequence[str] | None,
     reservation: str | None = None,
+    keep_worktrees: bool = False,
 ) -> dict[str, str]:
     """Assume a reserva, executa o plano e grava o estado final.
 
@@ -42,7 +43,7 @@ def execute(
         raise RecoveryRequired(
             'Não foi possível assumir a reserva; inspecione run.lock e o diretório da execução'
         ) from error
-    ctx = RunContext.open(ws, run_id)
+    ctx = RunContext.open(ws, run_id, keep_worktrees)
     run = ctx.state
     keep_lock = False
     try:
@@ -318,6 +319,23 @@ def integrate(
     run.statuses[task['id']] = 'approved'
     _persist_integration(ctx)
     target.head = integrated_head
+    if not ctx.keep_worktrees:
+        _discard_worktree(root, artifact, details)
+
+
+def _discard_worktree(root: Path, artifact: Artifact, details: dict) -> None:
+    """Remove o worktree e a branch de uma tarefa já integrada.
+
+    É apenas limpeza: uma falha fica registrada e não altera o resultado da tarefa.
+    O Git recusa remover um worktree com alterações, que então permanece para inspeção.
+    """
+    try:
+        gitops.git('worktree', 'remove', artifact.worktree, cwd=root)
+        if artifact.branch:
+            gitops.git('branch', '-D', artifact.branch.removeprefix('refs/heads/'), cwd=root)
+        details['worktree_removed'] = True
+    except Exception as error:
+        details['cleanup_error'] = str(error)
 
 
 def _abort_cherry_pick(root: Path, target: TargetCheckout) -> None:

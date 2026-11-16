@@ -78,9 +78,16 @@ class Workspace:
         retry_permission_error(tmp.replace, self.latest)
 
 
-def default_workspace() -> Workspace:
-    """O projeto orquestrado é o diretório que contém este pacote."""
-    return Workspace.for_root(Path(__file__).resolve().parent.parent)
+REPO_ENV = 'CONTRACANTO_REPO'
+
+
+def default_workspace(repo: str | Path | None = None) -> Workspace:
+    """Repositório orquestrado: `repo`, a variável CONTRACANTO_REPO ou,
+    na ausência de ambos, o diretório que contém este pacote."""
+    root = Path(repo or os.environ.get(REPO_ENV) or Path(__file__).resolve().parent.parent)
+    if not root.is_dir():
+        raise ValueError(f'Repositório não encontrado: {root}')
+    return Workspace.for_root(root)
 
 
 class StopSignal:
@@ -164,10 +171,12 @@ class RunContext:
     run_id: str
     state: RunState
     stop: StopSignal
+    # Mantém worktree e branch das tarefas aprovadas em vez de removê-los após a integração.
+    keep_worktrees: bool = False
 
     @classmethod
-    def open(cls, ws: Workspace, run_id: str) -> RunContext:
-        return cls(ws, run_id, RunState(ws.status(run_id), run_id), StopSignal(ws.stop_file(run_id)))
+    def open(cls, ws: Workspace, run_id: str, keep_worktrees: bool = False) -> RunContext:
+        return cls(ws, run_id, RunState(ws.status(run_id), run_id), StopSignal(ws.stop_file(run_id)), keep_worktrees)
 
     @property
     def root(self) -> Path:
