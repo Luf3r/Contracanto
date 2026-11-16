@@ -4,12 +4,15 @@ import contextlib
 import json
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import orchestrator as o
+import support
+
+from contracanto import agents, errors, gitops, runner
+from contracanto import process as proc
+from contracanto import state as st
 
 
 class SafetyGateTests(unittest.TestCase):
@@ -22,7 +25,7 @@ class SafetyGateTests(unittest.TestCase):
             git('commit', '-m', 'directory to rename')
             tasks = [dict(task, files=['old/a.txt', 'new/a.txt']), dict(task, id='B', files=['old/b.txt'])]
 
-            def agent(prompt, wt):
+            def agent(prompt, wt, stop=None):
                 if wt.name == 'wt-A':
                     (wt / 'old').rename(wt / 'new')
                 else:
@@ -31,10 +34,10 @@ class SafetyGateTests(unittest.TestCase):
 
             # Both workers start at the same commit. Integrate A first.
             with (
-                patch.object(o, 'run_agy', side_effect=agent),
-                patch.object(o.concurrent.futures, 'as_completed', side_effect=iter),
+                patch.object(agents, 'run_agy', side_effect=agent),
+                patch.object(runner.concurrent.futures, 'as_completed', side_effect=iter),
             ):
-                states = o.execute({'tasks': tasks}, 2, 0, [sys.executable, '-c', 'pass'])
+                states = runner.execute(self.ws, {'tasks': tasks}, 2, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'approved', 'B': 'failed'})
             details = json.loads((store / 'status.json').read_text())['details']
             self.assertIn('new/b.txt', details['B']['error'])
@@ -48,7 +51,7 @@ class SafetyGateTests(unittest.TestCase):
     def test_failed_approval_write_preserves_integrated_sha_and_lock(self):
         for persistent in (False, True):
             with self.subTest(persistent=persistent), self.repository() as (root, store, base, task, git):
-                original_write = o.write_json
+                original_write = st.write_json
                 failed = False
 
                 def write(path, value):
@@ -59,8 +62,11 @@ class SafetyGateTests(unittest.TestCase):
                     original_write(path, value)
 
                 second = dict(task, id='B', files=['b.txt'])
-                with patch.object(o, 'write_json', side_effect=write), self.assertRaises((o.RecoveryRequired, OSError)):
-                    o.execute({'tasks': [task, second]}, 1, 0, [sys.executable, '-c', 'pass'])
+                with (
+                    patch.object(st, 'write_json', side_effect=write),
+                    self.assertRaises((errors.RecoveryRequired, OSError)),
+                ):
+                    runner.execute(self.ws, {'tasks': [task, second]}, 1, 0, [sys.executable, '-c', 'pass'])
                 self.assertTrue(failed)
                 self.assertTrue((store / 'run.lock').exists())
                 state = json.loads((store / 'status.json').read_text())
@@ -78,7 +84,7 @@ class SafetyGateTests(unittest.TestCase):
                     'from pathlib import Path\n'
                     "if Path('.agent-runs').is_dir(): Path('outside.txt').write_text('modified')"
                 )
-                states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
                 self.assertEqual(states, {'A': 'failed'})
                 self.assertEqual((root / 'outside.txt').read_text(), 'modified')
                 self.assertTrue((store / 'run.lock').exists())
@@ -94,16 +100,18 @@ class SafetyGateTests(unittest.TestCase):
             (root / 'allowed.txt').write_bytes(content)
             git('add', 'allowed.txt', '.gitattributes')
             git('commit', '-m', 'legacy text')
-            original_cmd = o.cmd
+            original_cmd = proc.run
             payload = {}
 
             def command(args, **kwargs):
                 if args[0] == 'claude':
-                    payload.update(json.loads(kwargs['input_text'].split('\n', 1)[1]))
+                    payload.update(json.loads(kwargs['input_data'].split('\n', 1)[1]))
                 return original_cmd(args, **kwargs)
 
-            with patch.object(o, 'cmd', side_effect=command):
-                o.review(task, dict(worktree=str(root), report='done'), [sys.executable, '-c', 'pass'])
+            with patch.object(proc, 'run', side_effect=command):
+                agents.review(
+                    task, agents.Artifact(task=task, worktree=str(root), report='done'), [sys.executable, '-c', 'pass']
+                )
             git('switch', '--detach', base)
             subprocess.run(
                 ['git', 'apply', '-'],
@@ -123,10 +131,10 @@ class SafetyGateTests(unittest.TestCase):
             git('commit', '-m', 'sparse fixture')
             git('sparse-checkout', 'set', '--cone', 'src')
             self.assertFalse((root / 'docs/entry').exists())
-            self.assertEqual(o.changed_files(root), [])
+            self.assertEqual(gitops.changed_files(root), [])
             git('update-index', '--skip-worktree', 'src/entry')
             (root / 'src/entry').unlink()
-            self.assertIn('src/entry', o.changed_files(root))
+            self.assertIn('src/entry', gitops.changed_files(root))
 
     def test_ignored_local_data_survives_integration(self):
         for layout in ('file', 'directory', 'parent', 'nested_repo'):
@@ -144,7 +152,7 @@ class SafetyGateTests(unittest.TestCase):
                 local.write_bytes(b'local data')
                 task['files'] = ['.gitignore', 'cache.local']
 
-                def agent(prompt, wt):
+                def agent(prompt, wt, stop=None):
                     (wt / '.gitignore').write_text('.agent-runs/\n')
                     destination = wt / 'cache.local'
                     if layout in ('parent', 'nested_repo'):
@@ -153,8 +161,8 @@ class SafetyGateTests(unittest.TestCase):
                     destination.write_text('candidate')
                     return 'done'
 
-                with patch.object(o, 'run_agy', side_effect=agent):
-                    result = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+                with patch.object(agents, 'run_agy', side_effect=agent):
+                    result = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
                 self.assertEqual(result, {'A': 'failed'})
                 self.assertEqual(local.read_bytes(), b'local data')
                 self.assertEqual(git('rev-parse', 'HEAD').stdout, before)
@@ -167,7 +175,7 @@ class SafetyGateTests(unittest.TestCase):
             git('commit', '-m', 'Ignore untracked copies')
             task['files'] = ['outside.txt']
 
-            def agent(prompt, wt):
+            def agent(prompt, wt, stop=None):
                 (wt / 'outside.txt').unlink()
                 return 'deleted tracked file'
 
@@ -177,8 +185,8 @@ class SafetyGateTests(unittest.TestCase):
                 " Path('outside.txt').write_bytes(b'local diagnostic')\n"
                 ' raise SystemExit(1)'
             )
-            with patch.object(o, 'run_agy', side_effect=agent):
-                result = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
+            with patch.object(agents, 'run_agy', side_effect=agent):
+                result = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
             self.assertEqual(result, {'A': 'failed'})
             self.assertEqual((root / 'outside.txt').read_bytes(), b'local diagnostic')
             self.assertTrue((store / 'run.lock').exists())
@@ -198,7 +206,7 @@ class SafetyGateTests(unittest.TestCase):
             git('add', '.gitmodules', 'vendor')
             git('commit', '-m', 'Register submodule')
             code = "from pathlib import Path; p = Path('vendor/outside.txt'); p.exists() and p.write_text('dirty')"
-            result = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
+            result = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
             self.assertEqual(result, {'A': 'failed'})
             self.assertEqual((vendor / 'outside.txt').read_text(), 'dirty')
             self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
@@ -218,10 +226,10 @@ class SafetyGateTests(unittest.TestCase):
                     return InterruptedResult()
                 return result
 
-            with patch.object(o, 'git', side_effect=interrupt_after_pick):
+            with patch.object(gitops, 'git', side_effect=interrupt_after_pick):
                 try:
-                    o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
-                except (KeyboardInterrupt, o.RecoveryRequired):
+                    runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+                except (KeyboardInterrupt, errors.RecoveryRequired):
                     pass
             self.assertNotEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
             self.assertTrue((store / 'run.lock').exists())
@@ -236,10 +244,10 @@ class SafetyGateTests(unittest.TestCase):
                 git('switch', '-c', 'release')
                 raise RuntimeError('executor failed')
 
-            with patch.object(o, 'run_agy', side_effect=switch_and_fail):
+            with patch.object(agents, 'run_agy', side_effect=switch_and_fail):
                 try:
-                    o.execute({'tasks': [task]}, 1, 0, ['test'])
-                except o.RecoveryRequired:
+                    runner.execute(self.ws, {'tasks': [task]}, 1, 0, ['test'])
+                except errors.RecoveryRequired:
                     pass
             self.assertTrue((store / 'run.lock').exists())
             state = json.loads((store / 'status.json').read_text())
@@ -249,18 +257,18 @@ class SafetyGateTests(unittest.TestCase):
 
     def test_failed_test_diagnostic_reaches_repair_and_final_status(self):
         with self.repository() as (root, store, base, task, git):
-            agent = o.run_agy
+            agent = agents.run_agy
             repairs = []
 
-            def capture_repair(prompt, wt):
+            def capture_repair(prompt, wt, stop=None):
                 request = json.loads(prompt.split('\n', 1)[1])
                 if 'review' in request:
                     repairs.append(request['review'])
                 return agent(prompt, wt)
 
             command = [sys.executable, '-c', "import sys; sys.exit('missing expected record')"]
-            with patch.object(o, 'run_agy', side_effect=capture_repair):
-                result = o.execute({'tasks': [task]}, 1, 1, command)
+            with patch.object(agents, 'run_agy', side_effect=capture_repair):
+                result = runner.execute(self.ws, {'tasks': [task]}, 1, 1, command)
             self.assertEqual(result, {'A': 'failed'})
             self.assertEqual(len(repairs), 1)
             self.assertIn('missing expected record', repairs[0])
@@ -269,19 +277,11 @@ class SafetyGateTests(unittest.TestCase):
 
     @contextlib.contextmanager
     def repository(self, agent_commit=None, mutate_tests=None, test_exit=0):
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        with support.temp_dir() as directory:
             root = Path(directory).resolve()
-            original_cmd = o.cmd
+            original_cmd = proc.run
 
-            original_git = o.git
-
-            def git(*args, cwd=None, **kwargs):
-                return original_git(*args, cwd=cwd or root, **kwargs)
-
-            git('init', '-b', 'main')
-            git('config', 'user.name', 'Test')
-            git('config', 'user.email', 'test@localhost')
-            (root / '.gitignore').write_text('.agent-runs/\n')
+            git = support.init_repository(root)
             (root / 'outside.txt').write_text('original\n')
             git('add', '.')
             git('commit', '-m', 'baseline')
@@ -290,7 +290,7 @@ class SafetyGateTests(unittest.TestCase):
             store.mkdir()
             calls = {'agent': 0, 'review': 0}
 
-            def agent(prompt, wt):
+            def agent(prompt, wt, stop=None):
                 calls['agent'] += 1
                 if calls['agent'] == agent_commit:
                     (wt / 'outside.txt').write_text('unauthorized\n')
@@ -312,7 +312,7 @@ class SafetyGateTests(unittest.TestCase):
                         if test_exit == 'timeout':
                             raise subprocess.TimeoutExpired(args, 600)
                         if test_exit == 'cleanup':
-                            raise o.RecoveryRequired('Subprocess termination not confirmed')
+                            raise errors.RecoveryRequired('Subprocess termination not confirmed')
                         return subprocess.CompletedProcess(args, test_exit, '', '')
                 return original_cmd(args, **kwargs)
 
@@ -320,15 +320,10 @@ class SafetyGateTests(unittest.TestCase):
                 id='A', description='Create allowed.txt', deps=[], files=['allowed.txt'], acceptance=['File exists']
             )
             with contextlib.ExitStack() as stack:
-                for name, value in [
-                    ('ROOT', root),
-                    ('STORE', store),
-                    ('git', git),
-                    ('cmd', command),
-                    ('run_agy', agent),
-                ]:
-                    stack.enter_context(patch.object(o, name, value))
-                stack.enter_context(patch.object(o.shutil, 'which', return_value='fake-cli'))
+                self.ws = support.workspace(store, root)
+                for module, name, value in [(gitops, 'git', git), (proc, 'run', command), (agents, 'run_agy', agent)]:
+                    stack.enter_context(patch.object(module, name, value))
+                stack.enter_context(patch.object(runner.shutil, 'which', return_value='fake-cli'))
                 try:
                     yield root, store, base, task, git
                 finally:
@@ -338,7 +333,7 @@ class SafetyGateTests(unittest.TestCase):
 
     def test_executor_commit_outside_scope_is_not_integrated(self):
         with self.repository(agent_commit=1) as (root, store, base, task, git):
-            states = o.execute({'tasks': [task]}, 1, 1, [sys.executable, '-c', 'pass'])
+            states = runner.execute(self.ws, {'tasks': [task]}, 1, 1, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
             self.assertEqual((root / 'outside.txt').read_text(), 'original\n')
@@ -348,7 +343,7 @@ class SafetyGateTests(unittest.TestCase):
             with self.subTest(stage=stage), self.repository() as (root, store, base, task, git):
                 release_before = None
 
-                def agent(prompt, wt):
+                def agent(prompt, wt, stop=None):
                     nonlocal release_before
                     repair = '"review":' in prompt
                     if repair or stage == 'implementation':
@@ -358,10 +353,10 @@ class SafetyGateTests(unittest.TestCase):
                     return 'done'
 
                 with (
-                    patch.object(o, 'run_agy', side_effect=agent),
-                    patch.object(o, 'review', return_value=(False, 'REJECTED', '')),
+                    patch.object(agents, 'run_agy', side_effect=agent),
+                    patch.object(agents, 'review', return_value=(False, 'REJECTED', '')),
                 ):
-                    result = o.execute({'tasks': [task]}, 1, int(stage == 'repair'), ['test'])
+                    result = runner.execute(self.ws, {'tasks': [task]}, 1, int(stage == 'repair'), ['test'])
                 self.assertEqual(result, {'A': 'failed'})
                 self.assertEqual(git('rev-parse', 'release').stdout.strip(), release_before)
                 self.assertEqual(git('rev-parse', 'main').stdout.strip(), base)
@@ -376,7 +371,7 @@ class SafetyGateTests(unittest.TestCase):
                 "if Path('.agent-runs').exists():\n"
                 " subprocess.run(['git','merge','--no-ff','--no-commit','side'],check=True)"
             )
-            result = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
+            result = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
             self.assertEqual(result, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
             self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
@@ -388,16 +383,18 @@ class SafetyGateTests(unittest.TestCase):
             (root / 'allowed.txt').write_bytes(data)
             git('add', 'allowed.txt')
             git('commit', '-m', 'binary asset')
-            original_cmd = o.cmd
+            original_cmd = proc.run
             patches = []
 
             def command(args, **kwargs):
                 if args[0] == 'claude':
-                    patches.append(json.loads(kwargs['input_text'].split('\n', 1)[1])['patch'])
+                    patches.append(json.loads(kwargs['input_data'].split('\n', 1)[1])['patch'])
                 return original_cmd(args, **kwargs)
 
-            with patch.object(o, 'cmd', side_effect=command):
-                o.review(task, dict(worktree=str(root), report='done'), [sys.executable, '-c', 'pass'])
+            with patch.object(proc, 'run', side_effect=command):
+                agents.review(
+                    task, agents.Artifact(task=task, worktree=str(root), report='done'), [sys.executable, '-c', 'pass']
+                )
             git('switch', '--detach', base)
             applied = subprocess.run(['git', 'apply', '-'], input=patches[0].encode(), cwd=root, capture_output=True)
             self.assertEqual(applied.returncode, 0, applied.stderr)
@@ -405,44 +402,44 @@ class SafetyGateTests(unittest.TestCase):
 
     def test_repair_commit_outside_scope_is_not_squashed_and_integrated(self):
         with self.repository(agent_commit=2) as (root, store, base, task, git):
-            states = o.execute({'tasks': [task]}, 1, 1, [sys.executable, '-c', 'pass'])
+            states = runner.execute(self.ws, {'tasks': [task]}, 1, 1, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
             self.assertEqual((root / 'outside.txt').read_text(), 'original\n')
 
     def test_worker_tests_cannot_approve_a_dirty_worktree(self):
         with self.repository(mutate_tests='worker') as (root, store, base, task, git):
-            states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+            states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
             self.assertFalse((store / 'run.lock').exists())
 
     def test_dirty_worker_cannot_hide_uncertain_subprocess_cleanup(self):
         with self.repository(mutate_tests='worker', test_exit='cleanup') as (root, store, base, task, git):
-            states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+            states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
             self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
 
     def test_full_candidate_diff_is_checked_before_review(self):
         with self.repository() as (root, store, base, task, git):
-            original_executor = o.run_executor
+            original_executor = agents.run_executor
 
             # Remove the destination first so Git can rename into the authorized path.
             def forged_executor(*args):
                 artifact = original_executor(*args)
-                wt = Path(artifact['worktree'])
+                wt = Path(artifact.worktree)
                 (wt / 'allowed.txt').unlink()
                 git('mv', 'outside.txt', 'allowed.txt', cwd=wt)
                 git('add', '.', cwd=wt)
                 git('commit', '-m', 'rename outside scope', cwd=wt)
                 git('reset', '--soft', base, cwd=wt)
                 git('commit', '-m', 'squashed candidate', cwd=wt)
-                artifact['commit'] = git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
+                artifact.commit = git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
                 return artifact
 
-            with patch.object(o, 'run_executor', side_effect=forged_executor):
-                states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+            with patch.object(agents, 'run_executor', side_effect=forged_executor):
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
             self.assertIn('fora do escopo', json.loads((store / 'status.json').read_text())['details']['A']['error'])
@@ -455,7 +452,7 @@ class SafetyGateTests(unittest.TestCase):
                 "import subprocess; subprocess.run(['git','commit','--allow-empty','-m','unexpected'],check=True)",
             ]
             with self.assertRaises(RuntimeError):
-                o.run_tests(command, root, base)
+                gitops.run_tests(command, root, base)
             self.assertEqual(git('status', '--porcelain').stdout, '')
 
     def test_integration_tests_that_modify_files_require_manual_recovery(self):
@@ -464,13 +461,13 @@ class SafetyGateTests(unittest.TestCase):
                 self.subTest(exit_code=exit_code),
                 self.repository(mutate_tests='main', test_exit=exit_code) as (root, store, base, task, git),
             ):
-                states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
                 self.assertEqual(states, {'A': 'failed'})
                 self.assertTrue((store / 'run.lock').exists())
                 self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
                 self.assertEqual((root / 'outside.txt').read_text(), 'changed by tests\n')
                 with self.assertRaises(RuntimeError):
-                    o.reserve_run()
+                    st.reserve_run(self.ws)
 
     def test_git_inspection_failure_after_tests_preserves_history_and_reservation(self):
         for inspection in ('rev-parse', 'status'):
@@ -503,8 +500,8 @@ class SafetyGateTests(unittest.TestCase):
                         return git(*args, **kwargs)
 
                     second = dict(task, id='B', files=['another.txt'])
-                    with patch.object(o, 'git', side_effect=unreliable_git):
-                        states = o.execute({'tasks': [task, second]}, 1, 0, [sys.executable, '-c', code])
+                    with patch.object(gitops, 'git', side_effect=unreliable_git):
+                        states = runner.execute(self.ws, {'tasks': [task, second]}, 1, 0, [sys.executable, '-c', code])
                     self.assertTrue(failed, 'The intended Git read must have failed')
                     self.assertEqual(states, {'A': 'failed', 'B': 'blocked'})
                     self.assertTrue((store / 'run.lock').exists())
@@ -512,7 +509,7 @@ class SafetyGateTests(unittest.TestCase):
                     self.assertEqual((root / 'outside.txt').read_text(), 'changed by integration tests\n')
                     self.assertNotIn('Revert', git('log', '--format=%s').stdout)
                     with self.assertRaises(RuntimeError):
-                        o.reserve_run()
+                        st.reserve_run(self.ws)
 
     def test_unreadable_head_after_cherry_pick_requires_manual_recovery(self):
         with self.repository() as (root, store, base, task, git):
@@ -527,8 +524,8 @@ class SafetyGateTests(unittest.TestCase):
                     applied = True
                 return result
 
-            with patch.object(o, 'git', side_effect=unreliable_git):
-                states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+            with patch.object(gitops, 'git', side_effect=unreliable_git):
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
             self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
@@ -538,7 +535,7 @@ class SafetyGateTests(unittest.TestCase):
     def test_branch_change_during_review_blocks_integration(self):
         for switch in (('switch', '-c', 'unrelated'), ('switch', '--detach')):
             with self.subTest(switch=switch), self.repository() as (root, store, base, task, git):
-                original_review = o.review
+                original_review = agents.review
 
                 def switched_review(*args):
                     result = original_review(*args)
@@ -546,8 +543,8 @@ class SafetyGateTests(unittest.TestCase):
                     return result
 
                 second = dict(task, id='B', files=['another.txt'])
-                with patch.object(o, 'review', side_effect=switched_review):
-                    states = o.execute({'tasks': [task, second]}, 1, 0, [sys.executable, '-c', 'pass'])
+                with patch.object(agents, 'review', side_effect=switched_review):
+                    states = runner.execute(self.ws, {'tasks': [task, second]}, 1, 0, [sys.executable, '-c', 'pass'])
                 self.assertEqual(states, {'A': 'failed', 'B': 'blocked'})
                 self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
                 self.assertEqual(git('rev-parse', 'main').stdout.strip(), base)
@@ -562,14 +559,14 @@ class SafetyGateTests(unittest.TestCase):
                 "import subprocess; subprocess.run(['git','switch','-c','changed-by-tests'],check=True)",
             ]
             with self.assertRaises(RuntimeError):
-                o.run_tests(command, root, base)
+                gitops.run_tests(command, root, base)
             self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
             self.assertEqual(git('branch', '--show-current').stdout.strip(), 'changed-by-tests')
 
     def test_integration_branch_change_never_reverts_or_releases_reservation(self):
         for outcome in (0, 1, 'timeout', 'interrupt'):
             with self.subTest(outcome=outcome), self.repository() as (root, store, base, task, git):
-                original_cmd = o.cmd
+                original_cmd = proc.run
                 code = (
                     'from pathlib import Path\nimport subprocess,sys\n'
                     "if Path('.agent-runs').exists():\n"
@@ -587,9 +584,9 @@ class SafetyGateTests(unittest.TestCase):
                     return result
 
                 second = dict(task, id='B', files=['another.txt'])
-                with patch.object(o, 'cmd', side_effect=command):
+                with patch.object(proc, 'run', side_effect=command):
                     try:
-                        states = o.execute({'tasks': [task, second]}, 1, 0, [sys.executable, '-c', code])
+                        states = runner.execute(self.ws, {'tasks': [task, second]}, 1, 0, [sys.executable, '-c', code])
                     except KeyboardInterrupt:
                         self.fail('Branch change escaped without requiring recovery')
                 self.assertEqual(states, {'A': 'failed', 'B': 'blocked'})
@@ -599,7 +596,7 @@ class SafetyGateTests(unittest.TestCase):
                 self.assertEqual(git('rev-parse', 'HEAD').stdout, git('rev-parse', 'main').stdout)
                 self.assertNotIn('Revert', git('log', '--all', '--format=%s').stdout)
                 with self.assertRaises(RuntimeError):
-                    o.reserve_run()
+                    st.reserve_run(self.ws)
 
     def test_unreadable_branch_after_tests_requires_manual_recovery(self):
         with self.repository() as (root, store, base, task, git):
@@ -614,8 +611,8 @@ class SafetyGateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 128, '', 'branch read failed')
                 return git(*args, **kwargs)
 
-            with patch.object(o, 'git', side_effect=unreliable_git):
-                states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
+            with patch.object(gitops, 'git', side_effect=unreliable_git):
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
             self.assertEqual(states, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
             self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
@@ -623,7 +620,7 @@ class SafetyGateTests(unittest.TestCase):
 
     def test_branch_is_rechecked_before_rollback(self):
         with self.repository() as (root, store, base, task, git):
-            original_tests = o.run_tests
+            original_tests = gitops.run_tests
 
             def switched_tests(command, wt, *args, **kwargs):
                 result = original_tests(command, wt, *args, **kwargs)
@@ -632,8 +629,8 @@ class SafetyGateTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 1, '', 'failed')
                 return result
 
-            with patch.object(o, 'run_tests', side_effect=switched_tests):
-                states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+            with patch.object(gitops, 'run_tests', side_effect=switched_tests):
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
             self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
@@ -642,7 +639,7 @@ class SafetyGateTests(unittest.TestCase):
     def test_unchanged_detached_head_can_integrate(self):
         with self.repository() as (root, store, base, task, git):
             git('switch', '--detach')
-            states = o.execute({'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
+            states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'approved'})
             self.assertEqual(git('branch', '--show-current').stdout.strip(), '')
             self.assertEqual(git('rev-parse', 'main').stdout.strip(), base)

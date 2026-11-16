@@ -4,12 +4,17 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from orchestrator import ROOT, STORE, release_run, request_stop, reservation_id, reserve_run, validate, write_json
+from contracanto import config, process, state
+from contracanto.plan import validate
 
 mcp = FastMCP('Contracanto')
+WORKSPACE = state.default_workspace()
+WORKER_SCRIPT = Path(__file__).resolve().parent / 'orchestrator.py'
+LOG_TAIL = 4000
 
 
 @mcp.tool()
@@ -21,24 +26,27 @@ def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, *, test_com
     testado rodam com as permissões locais do worker antes da revisão e após a integração.
     Podem acessar arquivos fora do worktree, credenciais e rede, inclusive para push ou deploy.
     """
+    ws = WORKSPACE
     plan = json.loads(plan_json)
     validate(plan)
-    if parallel not in range(1, 9) or retries not in range(4):
-        return 'Erro: parallel 1..8; retries 0..3'
+    try:
+        config.check_limits(parallel, retries)
+    except ValueError as error:
+        return f'Erro: {error}'
     test = json.loads(test_command_json)
     if not isinstance(test, list) or not test or any(not isinstance(v, str) for v in test):
         return 'Erro: test_command_json deve ser uma lista não vazia de strings'
     try:
-        token = reserve_run()
+        token = state.reserve_run(ws)
     except RuntimeError as error:
         return str(error)
+    run = state.RunState(ws.status, state.reservation_id(token))
     try:
-        plan_file = STORE / 'submitted-plan.json'
-        write_json(plan_file, plan)
+        state.write_json(ws.plan, plan)
         argv = [
             sys.executable,
-            str(ROOT / 'orchestrator.py'),
-            str(plan_file),
+            str(WORKER_SCRIPT),
+            str(ws.plan),
             '--parallel',
             str(parallel),
             '--retries',
@@ -48,38 +56,32 @@ def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, *, test_com
             '--test',
             *test,
         ]
-        kw = (
-            {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
-            if os.name == 'nt'
-            else {'start_new_session': True}
-        )
         # Estado anterior não deve ser exibido como resultado da nova execução.
-        write_json(STORE / 'status.json', {'state': 'starting', 'run_id': reservation_id(token), 'statuses': {}})
-        with (STORE / 'run.log').open('w', encoding='utf-8') as log:
+        run.save()
+        with ws.log.open('w', encoding='utf-8') as log:
             proc = subprocess.Popen(
                 argv,
-                cwd=str(ROOT),
+                cwd=str(ws.root),
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 env=dict(os.environ, PYTHONIOENCODING='utf-8'),
-                **kw,
+                **process.detached_options(),
             )
     except Exception as error:
         try:
-            write_json(
-                STORE / 'status.json',
-                {'state': 'failed', 'run_id': reservation_id(token), 'statuses': {}, 'error': str(error)},
-            )
+            run.state = 'failed'
+            run.error = str(error)
+            run.save()
         finally:
             # Falhar ao registrar o erro não deve deixar uma reserva sem worker.
-            release_run(token)
+            state.release_run(ws, token)
         raise
     message = (
         f'Execução iniciada com PID {proc.pid}. Consulte get_run_status. O início não representa aprovação das tarefas.'
     )
     try:
-        (STORE / 'pid.txt').write_text(str(proc.pid), encoding='utf-8')
+        ws.pid.write_text(str(proc.pid), encoding='utf-8')
     except OSError as error:
         # The worker already owns the run; a diagnostic write must not undo it.
         message += (
@@ -92,33 +94,31 @@ def submit_plan(plan_json: str, parallel: int = 3, retries: int = 2, *, test_com
 @mcp.tool()
 def stop_run(run_id: str | None = None) -> str:
     """Solicita o encerramento da execução ativa. Passe o run_id do status para selecionar uma execução específica."""
-    return request_stop(run_id)
+    return state.request_stop(WORKSPACE, run_id)
 
 
 @mcp.tool()
 def get_run_status() -> str:
     """Retorna status persistido das tasks e as últimas linhas dos logs da execução."""
-    path = STORE / 'status.json'
-    status = path.read_text(encoding='utf-8') if path.exists() else 'Nenhum estado registrado'
-    logfile = STORE / 'run.log'
+    ws = WORKSPACE
+    status = ws.status.read_text(encoding='utf-8') if ws.status.exists() else 'Nenhum estado registrado'
     try:
-        data = logfile.read_bytes()
+        data = ws.log.read_bytes()
     except FileNotFoundError:
         data = b''
     try:
-        log = data.decode('utf-8')[-4000:]
+        log = data.decode('utf-8')[-LOG_TAIL:]
     except UnicodeDecodeError:
-        log = data.decode('cp1252', errors='replace')[-4000:]
-    reservation = STORE / 'run.lock'
+        log = data.decode('cp1252', errors='replace')[-LOG_TAIL:]
     try:
-        record = json.loads(reservation.read_text(encoding='utf-8'))
+        record = json.loads(ws.lock.read_text(encoding='utf-8'))
         public = {key: record[key] for key in ('run_id', 'pid') if key in record}
-        if record.get('supports_stop') and (STORE / f'stop-{record["run_id"]}').is_file():
+        if record.get('supports_stop') and ws.stop_file(record['run_id']).is_file():
             public['stop_requested'] = True
         lock = json.dumps(public)
         # Older workers used their credential as their public run_id too.
         if legacy_token := record.get('token'):
-            public_id = reservation_id(legacy_token)
+            public_id = state.reservation_id(legacy_token)
             status = status.replace(legacy_token, public_id)
             log = log.replace(legacy_token, public_id)
     except FileNotFoundError:
@@ -133,8 +133,7 @@ def get_run_status() -> str:
 @mcp.tool()
 def get_submitted_plan() -> str:
     """Exibe o plano de execução salvo atualmente."""
-    path = STORE / 'submitted-plan.json'
-    return path.read_text(encoding='utf-8') if path.exists() else 'Nenhum plano recebido'
+    return WORKSPACE.plan.read_text(encoding='utf-8') if WORKSPACE.plan.exists() else 'Nenhum plano recebido'
 
 
 if __name__ == '__main__':

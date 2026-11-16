@@ -5,23 +5,26 @@ import contextlib
 import json
 import os
 import subprocess
-import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import orchestrator as o
+import support
+
+from contracanto import agents, errors, gitops, runner
+from contracanto import process as proc
+from contracanto import state as st
 
 
 class RecoveryInterruptionTests(unittest.TestCase):
     def test_interrupted_cleanup_preserves_reservation(self):
         for stage in ('terminate', 'wait', 'kill'):
-            with self.subTest(stage=stage), tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+            with self.subTest(stage=stage), support.temp_dir() as directory:
                 store = Path(directory)
+                ws = support.workspace(store)
                 with contextlib.ExitStack() as stack:
-                    stack.enter_context(patch.object(o, 'STORE', store))
-                    launch = stack.enter_context(patch.object(o.subprocess, 'Popen'))
+                    launch = stack.enter_context(patch.object(proc.subprocess, 'Popen'))
                     process = launch.return_value
                     process.communicate.side_effect = [
                         subprocess.TimeoutExpired(['test'], 1),
@@ -30,19 +33,19 @@ class RecoveryInterruptionTests(unittest.TestCase):
                     if stage == 'kill':
                         process.kill.side_effect = KeyboardInterrupt('kill interrupted')
                     if os.name == 'nt':
-                        job = stack.enter_context(patch.object(o, 'WindowsJob'))
+                        job = stack.enter_context(patch.object(proc, 'WindowsJob'))
                         job.creationflags = 4
                         terminate = job.return_value.__enter__.return_value.terminate
                     else:
-                        terminate = stack.enter_context(patch.object(o.os, 'killpg'))
+                        terminate = stack.enter_context(patch.object(proc.os, 'killpg'))
                     if stage == 'wait':
                         terminate.return_value = subprocess.CompletedProcess([], 0, b'', b'')
                     else:
                         terminate.side_effect = KeyboardInterrupt('termination interrupted')
-                    stack.enter_context(patch.object(o, '_execute', side_effect=lambda *args: o.cmd(['test'])))
+                    stack.enter_context(patch.object(runner, '_execute', side_effect=lambda *args: proc.run(['test'])))
                     try:
-                        with self.assertRaises(o.RecoveryRequired):
-                            o.execute({}, 1, 0, ['test'])
+                        with self.assertRaises(errors.RecoveryRequired):
+                            runner.execute(ws, {}, 1, 0, ['test'])
                     except KeyboardInterrupt:
                         self.fail('Cleanup interruption escaped without preserving recovery')
                     state = json.loads((store / 'status.json').read_text())
@@ -50,12 +53,13 @@ class RecoveryInterruptionTests(unittest.TestCase):
                     self.assertTrue(state['recovery_required'])
                     self.assertTrue((store / 'run.lock').exists())
                     with self.assertRaises(RuntimeError):
-                        o.reserve_run()
+                        st.reserve_run(ws)
 
     def test_partial_submission_preserves_worker_recovery(self):
         for queued in (False, True):
-            with self.subTest(queued=queued), tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+            with self.subTest(queued=queued), support.temp_dir() as directory:
                 store = Path(directory)
+                ws = support.workspace(store)
                 release = threading.Event()
                 finished = threading.Event()
 
@@ -75,7 +79,7 @@ class RecoveryInterruptionTests(unittest.TestCase):
                     if not release.wait(timeout=5):
                         raise RuntimeError('Test did not release worker')
                     finished.set()
-                    raise o.RecoveryRequired('descendant termination unconfirmed')
+                    raise errors.RecoveryRequired('descendant termination unconfirmed')
 
                 def git(*args, **kwargs):
                     return subprocess.CompletedProcess(args, 0, 'base' if args[0] == 'rev-parse' else '', '')
@@ -85,14 +89,13 @@ class RecoveryInterruptionTests(unittest.TestCase):
                     for tid in ('A', 'B')
                 ]
                 with (
-                    patch.object(o, 'STORE', store),
-                    patch.object(o, 'git', side_effect=git),
-                    patch.object(o.shutil, 'which', return_value='tool'),
-                    patch.object(o, 'run_executor', side_effect=worker),
-                    patch.object(o.concurrent.futures, 'ThreadPoolExecutor', FailingPool),
+                    patch.object(gitops, 'git', side_effect=git),
+                    patch.object(runner.shutil, 'which', return_value='tool'),
+                    patch.object(agents, 'run_executor', side_effect=worker),
+                    patch.object(runner.concurrent.futures, 'ThreadPoolExecutor', FailingPool),
                 ):
                     with self.assertRaises(RuntimeError):
-                        o.execute({'tasks': tasks}, 2, 0, ['test'])
+                        runner.execute(ws, {'tasks': tasks}, 2, 0, ['test'])
                     self.assertTrue(finished.is_set())
                     state = json.loads((store / 'status.json').read_text())
                     self.assertEqual(state['state'], 'failed')
@@ -100,4 +103,4 @@ class RecoveryInterruptionTests(unittest.TestCase):
                     self.assertTrue((store / 'run.lock').exists())
                     self.assertNotIn('approved', state['statuses'].values())
                     with self.assertRaises(RuntimeError):
-                        o.reserve_run()
+                        st.reserve_run(ws)

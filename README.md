@@ -20,7 +20,7 @@ agy
 ```
 
 ## Preparação
-1. Copie os arquivos deste pacote para **a raiz do repositório Git** que deseja modificar. O script supõe que `orchestrator.py` está na raiz do repositório. Confirme com `git status` que as únicas modificações são os novos arquivos e faça um commit inicial.
+1. Copie os arquivos deste pacote, incluindo o diretório `contracanto/`, para **a raiz do repositório Git** que deseja modificar. O projeto orquestrado é o diretório que contém `contracanto/`, `orchestrator.py` e `mcp_server.py`. Confirme com `git status` que as únicas modificações são os novos arquivos e faça um commit inicial.
 2. No PowerShell, dentro do projeto:
 
 ```powershell
@@ -161,7 +161,7 @@ Se a reserva for removida durante uma consulta de status, o MCP informa `Sem res
 
 As atualizações de estado substituem o JSON de forma atômica. Se uma consulta no Windows bloquear a substituição do JSON ou a remoção de `run.lock`, o processo tenta novamente por até um segundo. Antes de cada tentativa de remoção, ele confere a identidade da reserva. Se a primeira gravação de `starting` falhar, o diagnóstico da nova execução usa listas de tarefas e detalhes vazias. Uma recuperação já exigida mantém a reserva mesmo se houver erro ao salvar o estado final ou ao ler o estado da execução em curso.
 
-O estado global final é `completed` quando todas as tarefas são aprovadas, `cancelled` quando o worker confirma o encerramento solicitado, ou `failed` em caso de falha. Erros de preparação ficam em `error`, associados a `run_id`. CLI e MCP iniciam em `starting`, com estado novo antes da preparação, sem reutilizar tarefas ou detalhes da execução anterior; durante o processamento consulte os estados individuais.
+O estado global final é `completed` quando todas as tarefas são aprovadas, `cancelled` quando o worker confirma o encerramento solicitado, ou `failed` em caso de falha. Erros de preparação ficam em `error`, associados a `run_id`. CLI e MCP iniciam em `starting`, com estado novo antes da preparação, sem reutilizar tarefas ou detalhes da execução anterior. O estado passa a `running` quando a preparação termina e as tarefas começam; `state`, `run_id` e `recovery_required` estão presentes em todas as gravações; durante o processamento consulte os estados individuais.
 
 Os estados das tarefas são `pending`, `running`, `review`, `approved`, `failed`, `blocked` e `cancelled`. Uma falha bloqueia todos os descendentes. `approved` significa revisão aprovada, testes do worktree aprovados, cherry-pick aplicado e testes de integração aprovados.
 

@@ -1,13 +1,15 @@
 import contextlib
 import json
 import subprocess
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import orchestrator as o
+import support
+
+from contracanto import agents, cli, gitops, runner
+from contracanto import process as proc
+from contracanto.plan import validate
 
 
 def task(tid, deps=()):
@@ -19,18 +21,15 @@ class RegressionTests(unittest.TestCase):
         for first, second in [('A', 'a'), ('Task_01', 'task_01')]:
             with self.subTest(ids=(first, second)):
                 with self.assertRaises(ValueError):
-                    o.validate({'tasks': [task(first), task(second)]})
+                    validate({'tasks': [task(first), task(second)]})
 
     def test_cli_forwards_test_options(self):
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        with support.temp_dir() as directory:
             plan = Path(directory) / 'plan.json'
             plan.write_text(json.dumps({'tasks': [task('A')]}))
-            with (
-                patch.object(sys, 'argv', ['orchestrator.py', str(plan), '--test', 'py', '-m', 'pytest']),
-                patch.object(o, 'execute', return_value={'A': 'approved'}) as execute,
-            ):
-                o.main()
-            self.assertEqual(execute.call_args.args[3], ['py', '-m', 'pytest'])
+            with patch.object(runner, 'execute', return_value={'A': 'approved'}) as execute:
+                cli.main([str(plan), '--test', 'py', '-m', 'pytest'])
+            self.assertEqual(execute.call_args.args[4], ['py', '-m', 'pytest'])
 
     def test_review_selects_sonnet_explicitly(self):
         calls = []
@@ -41,8 +40,10 @@ class RegressionTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, json.dumps({'result': 'APPROVED', 'is_error': False}), '')
             return subprocess.CompletedProcess(args, 0, b'' if '--binary' in args else '', '')
 
-        with patch.object(o, 'cmd', side_effect=command):
-            o.review(task('A'), {'worktree': '.', 'report': 'done'}, ['python', 'test.py'])
+        with patch.object(proc, 'run', side_effect=command):
+            agents.review(
+                task('A'), agents.Artifact(task=task('A'), worktree='.', report='done'), ['python', 'test.py']
+            )
         review_args = next(args for args in calls if args[0] == 'claude')
         self.assertEqual(review_args[review_args.index('--model') + 1], 'sonnet')
 
@@ -60,25 +61,26 @@ class RegressionTests(unittest.TestCase):
             failed = (revert_fails and args[0] == 'revert') or (abort_error and args[0] == 'cherry-pick')
             return subprocess.CompletedProcess(args, int(failed), 'base' if args[0] == 'rev-parse' else '', '')
 
-        def artifact(t, base, context):
-            return dict(task=t, commit='commit', worktree='.', report='done')
+        def artifact(ctx, t, base, context):
+            return agents.Artifact(task=t, commit='commit', worktree='.', report='done')
 
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory, contextlib.ExitStack() as stack:
-            for target, kwargs in [
-                ('STORE', {'new': Path(directory)}),
-                ('git', {'side_effect': git}),
-                ('run_executor', {'side_effect': executor or artifact}),
-                ('review', {'return_value': (True, 'APPROVED', '')}),
+        with support.temp_dir() as directory, contextlib.ExitStack() as stack:
+            ws = support.workspace(directory)
+            for module, target, kwargs in [
+                (gitops, 'git', {'side_effect': git}),
+                (agents, 'run_executor', {'side_effect': executor or artifact}),
+                (agents, 'review', {'return_value': (True, 'APPROVED', '')}),
                 (
-                    'cmd',
+                    proc,
+                    'run',
                     {'side_effect': integration_error}
                     if integration_error
                     else {'return_value': subprocess.CompletedProcess([], 0, '', '')},
                 ),
             ]:
-                stack.enter_context(patch.object(o, target, **kwargs))
-            stack.enter_context(patch.object(o.shutil, 'which', return_value='tool'))
-            statuses = o.execute({'tasks': tasks}, 1, 0, ['test'])
+                stack.enter_context(patch.object(module, target, **kwargs))
+            stack.enter_context(patch.object(runner.shutil, 'which', return_value='tool'))
+            statuses = runner.execute(ws, {'tasks': tasks}, 1, 0, ['test'])
         return statuses, calls
 
     def test_timeout_after_cherry_pick_reverts(self):
@@ -115,11 +117,11 @@ class RegressionTests(unittest.TestCase):
                 else:
                     t['files'] = files
                 with self.assertRaises(ValueError):
-                    o.validate({'tasks': [t]})
+                    validate({'tasks': [t]})
 
     def test_cycle_rejected(self):
         with self.assertRaises(ValueError):
-            o.validate({'tasks': [task('A', ['B']), task('B', ['A'])]})
+            validate({'tasks': [task('A', ['B']), task('B', ['A'])]})
 
 
 if __name__ == '__main__':

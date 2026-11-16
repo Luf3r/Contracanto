@@ -3,12 +3,14 @@
 import contextlib
 import json
 import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import orchestrator as o
+import support
+
+from contracanto import agents, errors, gitops, runner
+from contracanto import process as proc
 
 
 class GitIntegrationTests(unittest.TestCase):
@@ -19,13 +21,13 @@ class GitIntegrationTests(unittest.TestCase):
         self.assert_integration_failure_restores_tree(KeyboardInterrupt())
 
     def test_stop_during_integration_restores_tree_with_revert_commit(self):
-        self.assert_integration_failure_restores_tree(o.RunCancelled('Encerramento solicitado'))
+        self.assert_integration_failure_restores_tree(errors.RunCancelled('Encerramento solicitado'))
 
     def assert_integration_failure_restores_tree(self, error):
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        with support.temp_dir() as directory:
             root = Path(directory)
 
-            def git(*args, cwd=None, check=True):
+            def git(*args, cwd=None, check=True, **options):
                 return subprocess.run(
                     ['git', *args], cwd=cwd or root, check=check, capture_output=True, text=True, encoding='utf-8'
                 )
@@ -40,34 +42,32 @@ class GitIntegrationTests(unittest.TestCase):
             store.mkdir()
             before = git('rev-parse', 'HEAD^{tree}').stdout.strip()
 
-            def executor(task, base, context):
+            def executor(ctx, task, base, context):
                 wt = root / '.agent-runs' / 'worker'
                 git('worktree', 'add', '-b', 'worker', str(wt), base)
                 (wt / 'feature.txt').write_text('change')
                 git('add', 'feature.txt', cwd=wt)
                 git('commit', '-m', 'feature', cwd=wt)
-                return dict(
-                    task=task, commit=git('rev-parse', 'HEAD', cwd=wt).stdout.strip(), worktree=str(wt), report='done'
-                )
+                commit = git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
+                return agents.Artifact(task=task, commit=commit, worktree=str(wt), report='done')
 
             with contextlib.ExitStack() as stack:
-                stack.enter_context(patch.object(o, 'ROOT', root))
-                stack.enter_context(patch.object(o, 'STORE', store))
-                stack.enter_context(patch.object(o, 'git', side_effect=git))
-                stack.enter_context(patch.object(o.shutil, 'which', return_value='tool'))
-                stack.enter_context(patch.object(o, 'run_executor', side_effect=executor))
-                stack.enter_context(patch.object(o, 'review', return_value=(True, 'APPROVED', '')))
-                stack.enter_context(patch.object(o, 'cmd', side_effect=error))
+                ws = support.workspace(store, root)
+                stack.enter_context(patch.object(gitops, 'git', side_effect=git))
+                stack.enter_context(patch.object(runner.shutil, 'which', return_value='tool'))
+                stack.enter_context(patch.object(agents, 'run_executor', side_effect=executor))
+                stack.enter_context(patch.object(agents, 'review', return_value=(True, 'APPROVED', '')))
+                stack.enter_context(patch.object(proc, 'run', side_effect=error))
                 plan = {
                     'tasks': [dict(id='A', description='Change', deps=[], files=['feature.txt'], acceptance=['Pass'])]
                 }
-                if isinstance(error, (KeyboardInterrupt, o.RunCancelled)):
+                if isinstance(error, (KeyboardInterrupt, errors.RunCancelled)):
                     with self.assertRaises(type(error)):
-                        o.execute(plan, 1, 0, ['test'])
+                        runner.execute(ws, plan, 1, 0, ['test'])
                 else:
-                    self.assertEqual(o.execute(plan, 1, 0, ['test']), {'A': 'failed'})
+                    self.assertEqual(runner.execute(ws, plan, 1, 0, ['test']), {'A': 'failed'})
             state = json.loads((store / 'status.json').read_text())
-            self.assertEqual(state['state'], 'cancelled' if isinstance(error, o.RunCancelled) else 'failed')
+            self.assertEqual(state['state'], 'cancelled' if isinstance(error, errors.RunCancelled) else 'failed')
             self.assertFalse(state.get('recovery_required', False))
             details = state['details']['A']
             self.assertEqual(details['revert_commit'], git('rev-parse', 'HEAD').stdout.strip())

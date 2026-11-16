@@ -3,13 +3,15 @@
 import contextlib
 import json
 import sys
-import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import orchestrator as o
+import support
+
+from contracanto import gitops, runner
+from contracanto import process as proc
 
 FAKE_CLI = """import json,sys
 from pathlib import Path
@@ -35,18 +37,10 @@ class WorkflowTests(unittest.TestCase):
         self.run_workflow(goal='Preservar compatibilidade e documentação em português.')
 
     def run_workflow(self, goal=None):
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        with support.temp_dir() as directory:
             root = Path(directory)
-            original_cmd = o.cmd
-            original_git = o.git
-
-            def git(*args, cwd=None, **kwargs):
-                return original_git(*args, cwd=cwd or root, **kwargs)
-
-            git('init', '-b', 'main')
-            git('config', 'user.name', 'Test')
-            git('config', 'user.email', 'test@localhost')
-            (root / '.gitignore').write_text('.agent-runs/\n')
+            original_cmd = proc.run
+            git = support.init_repository(root)
             (root / 'fake_cli.py').write_text(FAKE_CLI, encoding='utf-8')
             (root / 'check.py').write_text(
                 "from pathlib import Path\nassert all(p.read_text() == 'ok\\n' for p in Path('.').glob('*.txt'))\n"
@@ -61,7 +55,7 @@ class WorkflowTests(unittest.TestCase):
             def command(args, **kwargs):
                 kwargs.setdefault('cwd', root)
                 if args[0] in ('agy', 'claude'):
-                    prompt = kwargs['input_text']
+                    prompt = kwargs['input_data']
                     if args[0] == 'agy':
                         prompt = json.loads(prompt)['message']['content']
                     data = json.loads(prompt.split('\n', 1)[1])
@@ -82,13 +76,14 @@ class WorkflowTests(unittest.TestCase):
                 ]
             ]
             with contextlib.ExitStack() as stack:
-                for name, value in [('ROOT', root), ('STORE', store), ('git', git), ('cmd', command)]:
-                    stack.enter_context(patch.object(o, name, value))
-                stack.enter_context(patch.object(o.shutil, 'which', return_value='test-cli'))
+                ws = support.workspace(store, root)
+                stack.enter_context(patch.object(gitops, 'git', git))
+                stack.enter_context(patch.object(proc, 'run', command))
+                stack.enter_context(patch.object(runner.shutil, 'which', return_value='test-cli'))
                 plan = {'tasks': tasks}
                 if goal is not None:
                     plan['goal'] = goal
-                states = o.execute(plan, 2, 1, [sys.executable, 'check.py'])
+                states = runner.execute(ws, plan, 2, 1, [sys.executable, 'check.py'])
             self.assertEqual(states, {'A': 'approved', 'B': 'approved', 'C': 'approved'})
             self.assertEqual(json.loads((store / 'status.json').read_text())['state'], 'completed')
             self.assertIn('revised', git('log', '--oneline').stdout)

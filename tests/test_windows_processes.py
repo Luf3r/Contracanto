@@ -5,19 +5,21 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import orchestrator as o
+import support
+
+from contracanto import errors, runner
+from contracanto import process as proc
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows process containment')
 class WindowsProcessTests(unittest.TestCase):
     def test_extra_suspend_is_left_for_its_owner_to_release(self):
-        import windows_job as w
+        from contracanto import windows_job as w
 
         resume = w.win32process.ResumeThread
         counts = []
@@ -33,12 +35,12 @@ class WindowsProcessTests(unittest.TestCase):
                 resume(thread)
 
         with patch.object(w.win32process, 'ResumeThread', side_effect=concurrent_suspend):
-            result = o.cmd([sys.executable, '-c', 'print("started")'], timeout=5)
+            result = proc.run([sys.executable, '-c', 'print("started")'], timeout=5)
         self.assertEqual(counts, [2])
         self.assertEqual(result.stdout.strip(), 'started')
 
     def assert_tree_stopped(self, parent_exits=False, taskkill_unavailable=False):
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        with support.temp_dir() as directory:
             marker = Path(directory).resolve() / 'late.txt'
             child = f'import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).write_text("late")'
             parent = f'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",{child!r}]); ' + (
@@ -53,9 +55,9 @@ class WindowsProcessTests(unittest.TestCase):
 
             # The base executable exits immediately, unlike the venv launcher.
             outcome = None
-            with patch.object(o.subprocess, 'run', side_effect=run):
+            with patch.object(proc.subprocess, 'run', side_effect=run):
                 try:
-                    o.cmd([sys._base_executable, '-c', parent], timeout=0.6)
+                    proc.run([sys._base_executable, '-c', parent], timeout=0.6)
                 except Exception as error:
                     outcome = error
             # Also check survivors if the runner returned the wrong exception.
@@ -70,14 +72,14 @@ class WindowsProcessTests(unittest.TestCase):
         self.assert_tree_stopped(parent_exits=True)
 
     def test_assignment_failure_never_runs_command(self):
-        import windows_job as w
+        from contracanto import windows_job as w
 
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        with support.temp_dir() as directory:
             marker = Path(directory).resolve() / 'should-not-run.txt'
             code = f'from pathlib import Path; Path({str(marker)!r}).touch()'
             with patch.object(w.win32job, 'AssignProcessToJobObject', side_effect=OSError('assignment denied')):
                 with self.assertRaisesRegex(OSError, 'assignment denied'):
-                    o.cmd([sys.executable, '-c', code], timeout=2)
+                    proc.run([sys.executable, '-c', code], timeout=2)
             self.assertFalse(marker.exists())
 
     def test_startup_interrupt_reaps_suspended_process(self):
@@ -85,7 +87,7 @@ class WindowsProcessTests(unittest.TestCase):
         previous_trace = sys.gettrace()
 
         def interrupt_after_creation(frame, event, arg):
-            if frame.f_code is o.cmd.__code__ and event == 'line':
+            if frame.f_code is proc.run.__code__ and event == 'line':
                 process = frame.f_locals.get('process')
                 if isinstance(process, subprocess.Popen):
                     created.append(process)
@@ -96,7 +98,7 @@ class WindowsProcessTests(unittest.TestCase):
         try:
             sys.settrace(interrupt_after_creation)
             with self.assertRaises(KeyboardInterrupt):
-                o.cmd([sys.executable, '-c', 'import time; time.sleep(20)'])
+                proc.run([sys.executable, '-c', 'import time; time.sleep(20)'])
         finally:
             sys.settrace(previous_trace)
             alive = [process for process in created if process.poll() is None]
@@ -108,50 +110,52 @@ class WindowsProcessTests(unittest.TestCase):
         self.assertFalse(alive, 'Startup interruption leaked a suspended subprocess')
 
     def test_unconfirmed_job_termination_preserves_reservation(self):
-        import windows_job as w
+        from contracanto import windows_job as w
 
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        with support.temp_dir() as directory:
             store = Path(directory)
+            ws = support.workspace(store)
             with (
-                patch.object(o, 'STORE', store),
                 patch.object(
-                    o,
+                    runner,
                     '_execute',
-                    side_effect=lambda *args: o.cmd([sys.executable, '-c', 'import time; time.sleep(20)'], timeout=0.3),
+                    side_effect=lambda *args: proc.run(
+                        [sys.executable, '-c', 'import time; time.sleep(20)'], timeout=0.3
+                    ),
                 ),
                 patch.object(w.win32job, 'TerminateJobObject', side_effect=OSError('termination denied')),
             ):
-                with self.assertRaises(o.RecoveryRequired):
-                    o.execute({}, 1, 0, ['test'])
+                with self.assertRaises(errors.RecoveryRequired):
+                    runner.execute(ws, {}, 1, 0, ['test'])
                 self.assertTrue((store / 'run.lock').exists())
                 self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
 
     def test_failed_termination_closes_job_before_waiting_for_child_pipes(self):
-        import windows_job as w
+        from contracanto import windows_job as w
 
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        with support.temp_dir() as directory:
             marker = Path(directory).resolve() / 'late.txt'
             child = f'import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).touch()'
             parent = f'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",{child!r}]); time.sleep(20)'
             with patch.object(w.win32job, 'TerminateJobObject', side_effect=OSError('termination denied')):
-                with self.assertRaises(o.RecoveryRequired):
-                    o.cmd([sys.executable, '-c', parent], timeout=0.6)
+                with self.assertRaises(errors.RecoveryRequired):
+                    proc.run([sys.executable, '-c', parent], timeout=0.6)
             time.sleep(2.1)
             self.assertFalse(marker.exists(), 'Pipe cleanup waited while a descendant was still running')
 
     def test_parallel_command_survives_other_commands_timeout(self):
         def timeout():
             with self.assertRaises(subprocess.TimeoutExpired):
-                o.cmd([sys.executable, '-c', 'import time; time.sleep(20)'], timeout=0.3)
+                proc.run([sys.executable, '-c', 'import time; time.sleep(20)'], timeout=0.3)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             interrupted = pool.submit(timeout)
-            other = pool.submit(o.cmd, [sys.executable, '-c', 'import time; time.sleep(1); print("survived")'])
+            other = pool.submit(proc.run, [sys.executable, '-c', 'import time; time.sleep(1); print("survived")'])
             interrupted.result()
             self.assertEqual(other.result().stdout.strip(), 'survived')
 
     def test_success_cleans_up_detached_descendant(self):
-        with tempfile.TemporaryDirectory(dir=o.STORE) as directory:
+        with support.temp_dir() as directory:
             marker = Path(directory).resolve() / 'late.txt'
             child = f'import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).touch()'
             parent = (
@@ -159,7 +163,7 @@ class WindowsProcessTests(unittest.TestCase):
                 f'subprocess.Popen([sys.executable,"-c",{child!r}], '
                 'stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)'
             )
-            result = o.cmd([sys.executable, '-c', parent])
+            result = proc.run([sys.executable, '-c', parent])
             time.sleep(2.1)
             self.assertEqual(result.returncode, 0)
             self.assertFalse(marker.exists())
