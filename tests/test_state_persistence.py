@@ -18,18 +18,14 @@ class StatePersistenceTests(unittest.TestCase):
         with support.temp_dir() as directory:
             store = Path(directory)
             ws = support.workspace(store)
-            path = store / 'status.json'
             write = st.write_json
-            write(
-                path,
-                dict(
-                    state='failed',
-                    run_id='old',
-                    statuses={'OLD': 'approved'},
-                    details={'OLD': {'review': 'old review'}},
-                    recovery_required=True,
-                ),
+            previous = dict(
+                state='failed',
+                statuses={'OLD': 'approved'},
+                details={'OLD': {'review': 'old review'}},
+                recovery_required=True,
             )
+            old = support.publish_previous_run(ws, previous)
 
             def fail_starting(path, value):
                 if value.get('state') == 'starting':
@@ -39,9 +35,9 @@ class StatePersistenceTests(unittest.TestCase):
             with patch.object(st, 'write_json', side_effect=fail_starting):
                 with self.assertRaisesRegex(PermissionError, 'initial status locked'):
                     runner.execute(ws, {}, 1, 0, ['test'])
-            state = json.loads(path.read_text())
+            state = support.read_status(ws)
             self.assertEqual(state['state'], 'failed')
-            self.assertNotEqual(state['run_id'], 'old')
+            self.assertNotEqual(state['run_id'], old)
             self.assertEqual(state['statuses'], {})
             self.assertEqual(state['details'], {})
             self.assertFalse(state['recovery_required'])
@@ -68,7 +64,7 @@ class StatePersistenceTests(unittest.TestCase):
             original_replace = Path.replace
 
             def replace(source, target):
-                if json.loads(source.read_text()).get('recovery_required'):
+                if target.name == 'status.json' and json.loads(source.read_text()).get('recovery_required'):
                     raise PermissionError('cannot persist recovery')
                 return original_replace(source, target)
 
@@ -111,7 +107,7 @@ class StatePersistenceTests(unittest.TestCase):
                     with self.assertRaises(PermissionError):
                         runner.execute(ws, {}, 1, 0, ['test'])
                     self.assertTrue((store / 'run.lock').exists())
-                    self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                    self.assertTrue(support.read_status(ws)['recovery_required'])
                     with self.assertRaises(RuntimeError):
                         st.reserve_run(ws)
 
@@ -128,7 +124,7 @@ class StatePersistenceTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     runner.execute(ws, {}, 1, 0, ['test'])
                 self.assertTrue((store / 'run.lock').exists())
-                self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                self.assertTrue(support.read_status(ws)['recovery_required'])
 
     @unittest.skipUnless(os.name == 'nt', 'Windows blocks replacement while readers are open')
     def test_status_write_survives_brief_windows_reader(self):

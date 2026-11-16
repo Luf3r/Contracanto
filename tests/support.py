@@ -1,6 +1,7 @@
 """Fixtures compartilhadas: diretórios temporários, workspaces e repositórios Git descartáveis."""
 
 import contextlib
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -58,3 +59,15 @@ def init_repository(root, ignore_store=True):
     if ignore_store:
         (root / '.gitignore').write_text('.agent-runs/\n')
     return git
+
+
+def read_status(ws):
+    """Status persistido da execução mais recente."""
+    return json.loads(ws.status(ws.latest_run_id()).read_text(encoding='utf-8'))
+
+
+def publish_previous_run(ws, status, run_id='a' * 64):
+    """Registra uma execução anterior já encerrada."""
+    ws.publish_run(run_id)
+    ws.status(run_id).write_text(json.dumps(dict(status, run_id=run_id)), encoding='utf-8')
+    return run_id

@@ -61,7 +61,7 @@ class OperationalTests(unittest.TestCase):
                             runner.execute(ws, dict(tasks=[current]), 1, 0, ['test'])
                     except KeyboardInterrupt:
                         self.fail('Interrupção descartou a recuperação exigida pelo worker')
-                    state = json.loads((store / 'status.json').read_text())
+                    state = support.read_status(ws)
                     self.assertEqual(state['state'], 'failed')
                     self.assertEqual(state['recovery_required'], uncertain)
                     self.assertEqual((store / 'run.lock').exists(), uncertain)
@@ -82,7 +82,7 @@ class OperationalTests(unittest.TestCase):
                 with self.assertRaises(errors.RecoveryRequired):
                     runner.execute(ws, dict(tasks=[task(['a'])]), 1, 0, ['test'])
                 self.assertTrue((store / 'run.lock').exists())
-                self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                self.assertTrue(support.read_status(ws)['recovery_required'])
                 with self.assertRaises(RuntimeError):
                     st.reserve_run(ws)
 
@@ -91,11 +91,14 @@ class OperationalTests(unittest.TestCase):
             store = Path(directory)
             ws = support.workspace(store)
             token = st.reserve_run(ws)
+            run_id = st.reservation_id(token)
+            ws.publish_run(run_id)
             original = '{"state":"starting","statuses":{}}'
-            (store / 'status.json').write_text(original)
+            ws.status(run_id).write_text(original)
             with self.assertRaises(RuntimeError):
                 runner.execute(ws, dict(tasks=[task(['a'])]), 1, 0, ['test'], reservation='invalid')
-            self.assertEqual((store / 'status.json').read_text(), original)
+            self.assertEqual(ws.status(run_id).read_text(), original)
+            self.assertEqual(ws.latest_run_id(), run_id)
             self.assertTrue((store / 'run.lock').exists())
             st.release_run(ws, token)
 
@@ -106,7 +109,7 @@ class OperationalTests(unittest.TestCase):
             with patch.object(runner, '_execute', side_effect=KeyboardInterrupt):
                 with self.assertRaises(KeyboardInterrupt):
                     runner.execute(ws, dict(tasks=[task(['a'])]), 1, 0, ['test'])
-            self.assertEqual(json.loads((store / 'status.json').read_text())['state'], 'failed')
+            self.assertEqual(support.read_status(ws)['state'], 'failed')
             self.assertFalse((store / 'run.lock').exists())
 
     def test_large_unicode_input_roundtrip(self):
@@ -143,7 +146,7 @@ class OperationalTests(unittest.TestCase):
             with patch.object(runner.shutil, 'which', return_value=None):
                 with self.assertRaises(RuntimeError):
                     runner.execute(ws, dict(tasks=[task(['a'])]), 1, 0, ['test'])
-            state = json.loads((store / 'status.json').read_text())
+            state = support.read_status(ws)
             self.assertEqual(state['state'], 'failed')
             self.assertIn('PATH', state['error'])
             self.assertFalse((store / 'run.lock').exists())
@@ -154,22 +157,23 @@ class OperationalTests(unittest.TestCase):
             ws = support.workspace(store)
             previous = dict(
                 state='completed',
-                run_id='old',
                 statuses={'OLD': 'approved'},
                 details={'OLD': {'commit': 'old-commit'}},
                 recovery_required=True,
             )
-            (store / 'status.json').write_text(json.dumps(previous))
+            old = support.publish_previous_run(ws, previous)
             with patch.object(runner.shutil, 'which', return_value=None):
                 with self.assertRaises(RuntimeError):
                     runner.execute(ws, dict(tasks=[task(['a'])]), 1, 0, ['test'])
-            state = json.loads((store / 'status.json').read_text())
-            self.assertNotEqual(state['run_id'], 'old')
+            state = support.read_status(ws)
+            self.assertNotEqual(state['run_id'], old)
             self.assertEqual(state['state'], 'failed')
             self.assertEqual(state['statuses'], {})
             self.assertEqual(state['details'], {})
             self.assertFalse(state['recovery_required'])
             self.assertFalse((store / 'run.lock').exists())
+            # O registro da execução anterior continua disponível para inspeção.
+            self.assertEqual(json.loads(ws.status(old).read_text())['statuses'], {'OLD': 'approved'})
 
     def test_interrupted_git_integration_preserves_reservation(self):
         for operation in ('cherry-pick', 'revert'):
@@ -196,7 +200,7 @@ class OperationalTests(unittest.TestCase):
                     except KeyboardInterrupt:
                         self.fail('Interrupção Git escapou sem exigir recuperação')
                     self.assertTrue((store / 'run.lock').exists())
-                    state = json.loads((store / 'status.json').read_text())
+                    state = support.read_status(ws)
                     self.assertTrue(state['recovery_required'])
                     self.assertEqual(state['statuses'], {'A': 'failed'})
                     with self.assertRaises(RuntimeError):

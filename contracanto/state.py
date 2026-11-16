@@ -37,26 +37,45 @@ class Workspace:
         return self.store / 'run.lock'
 
     @property
-    def status(self) -> Path:
-        return self.store / 'status.json'
-
-    @property
-    def plan(self) -> Path:
-        return self.store / 'submitted-plan.json'
-
-    @property
-    def log(self) -> Path:
-        return self.store / 'run.log'
-
-    @property
-    def pid(self) -> Path:
-        return self.store / 'pid.txt'
-
-    def stop_file(self, run_id: str) -> Path:
-        return self.store / f'stop-{run_id}'
+    def latest(self) -> Path:
+        """Ponteiro para a execução mais recente; sobrevive à liberação da reserva."""
+        return self.store / 'latest-run'
 
     def run_dir(self, run_id: str) -> Path:
         return self.store / 'runs' / run_id
+
+    def status(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / 'status.json'
+
+    def plan(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / 'plan.json'
+
+    def log(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / 'run.log'
+
+    def pid(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / 'pid.txt'
+
+    def stop_file(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / 'stop'
+
+    def claim(self, run_id: str) -> Path:
+        """Diretório criado uma única vez pelo worker que assume a execução."""
+        return self.run_dir(run_id) / 'claim'
+
+    def latest_run_id(self) -> str | None:
+        try:
+            run_id = self.latest.read_text(encoding='utf-8').strip()
+        except FileNotFoundError:
+            return None
+        return run_id if RUN_ID.fullmatch(run_id) else None
+
+    def publish_run(self, run_id: str) -> None:
+        """Cria o diretório da execução e a torna a consultada por padrão."""
+        self.run_dir(run_id).mkdir(parents=True, exist_ok=True)
+        tmp = self.latest.with_suffix('.tmp')
+        tmp.write_text(run_id, encoding='utf-8')
+        retry_permission_error(tmp.replace, self.latest)
 
 
 def default_workspace() -> Workspace:
@@ -148,7 +167,7 @@ class RunContext:
 
     @classmethod
     def open(cls, ws: Workspace, run_id: str) -> RunContext:
-        return cls(ws, run_id, RunState(ws.status, run_id), StopSignal(ws.stop_file(run_id)))
+        return cls(ws, run_id, RunState(ws.status(run_id), run_id), StopSignal(ws.stop_file(run_id)))
 
     @property
     def root(self) -> Path:
@@ -208,13 +227,14 @@ def request_stop(ws: Workspace, run_id: str | None = None) -> str:
     if not record.get('supports_stop') or not RUN_ID.fullmatch(active_id):
         return 'Esta reserva não oferece encerramento cooperativo. Consulte o procedimento de recuperação.'
     try:
-        current = json.loads(ws.status.read_text(encoding='utf-8'))
+        current = json.loads(ws.status(active_id).read_text(encoding='utf-8'))
     except FileNotFoundError:
         current = {}
-    if current.get('run_id') == active_id and current.get('state') in TERMINAL_STATES:
+    if current.get('state') in TERMINAL_STATES:
         if current.get('recovery_required'):
             return 'Execução finalizada com recuperação manual pendente.'
         return 'Execução já finalizada.'
-    # The request may precede the worker's single-use mkdir or race a new run.
+    # The request may precede the worker's claim or race a new run.
+    ws.run_dir(active_id).mkdir(parents=True, exist_ok=True)
     ws.stop_file(active_id).touch()
     return f'Encerramento solicitado para {active_id}. Consulte get_run_status para confirmar o término.'

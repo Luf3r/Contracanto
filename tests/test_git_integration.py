@@ -1,7 +1,6 @@
 """Git real; somente os CLIs pagos e o resultado dos testes são substituídos."""
 
 import contextlib
-import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -66,7 +65,7 @@ class GitIntegrationTests(unittest.TestCase):
                         runner.execute(ws, plan, 1, 0, ['test'])
                 else:
                     self.assertEqual(runner.execute(ws, plan, 1, 0, ['test']), {'A': 'failed'})
-            state = json.loads((store / 'status.json').read_text())
+            state = support.read_status(ws)
             self.assertEqual(state['state'], 'cancelled' if isinstance(error, errors.RunCancelled) else 'failed')
             self.assertFalse(state.get('recovery_required', False))
             details = state['details']['A']

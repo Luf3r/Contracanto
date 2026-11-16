@@ -151,13 +151,20 @@ Peça ao Claude na aba Code:
 
 Para encerrar o plano ativo pelo MCP, chame `stop_run()`. Você também pode passar o `run_id` obtido em `get_run_status()` para selecionar uma execução específica. Pelo terminal, execute `py orchestrator.py --stop` na raiz do projeto, em outra janela. As duas opções servem para planos iniciados pela CLI ou pelo MCP.
 
-O pedido retorna imediatamente. A reserva mostra `stop_requested: true` enquanto o worker encerra os comandos de modelo e testes. Operações Git em andamento chegam a um ponto seguro. Se o cancelamento interromper os testes de integração, o worker verifica o repositório e reverte o commit em teste quando for seguro. Tarefas já aprovadas mantêm seus commits. Consulte `get_run_status()` ou `.agent-runs/status.json` para confirmar o estado final `cancelled`. Se o plano já tiver terminado, vale o resultado registrado. Um encerramento incerto continua exigindo recuperação manual.
+O pedido retorna imediatamente. Em `get_run_status()`, `reservation.stop_requested` fica `true` enquanto o worker encerra os comandos de modelo e testes. Operações Git em andamento chegam a um ponto seguro. Se o cancelamento interromper os testes de integração, o worker verifica o repositório e reverte o commit em teste quando for seguro. Tarefas já aprovadas mantêm seus commits. Consulte `get_run_status()` ou `.agent-runs/runs/<run_id>/status.json` para confirmar o estado final `cancelled`. Se o plano já tiver terminado, vale o resultado registrado. Um encerramento incerto continua exigindo recuperação manual.
 
 CLI e MCP compartilham uma reserva exclusiva em `.agent-runs/run.lock`, criada antes de gravar o plano ou iniciar o processo. Uma segunda execução é recusada. A reserva é liberada ao término normal e em erros tratados com estado conhecido. Em falhas de recuperação Git ou encerramento incerto de subprocessos, `recovery_required: true` preserva a reserva para impedir novas execuções até inspeção manual. Interrupções abruptas também podem preservá-la.
 
 O status expõe o identificador público da execução. O worker usa uma credencial de uso único para assumir a reserva. Repetir a chamada do worker preserva o plano, o estado e a reserva da execução ativa.
 
-Se a reserva for removida durante uma consulta de status, o MCP informa `Sem reserva ativa`. Se não conseguir gravar `pid.txt` após iniciar o worker, `submit_plan` confirma o início e retorna um aviso com o PID correto; a execução continua e a reserva permanece sob controle do worker. Nesse caso, `pid.txt` pode estar ausente, incompleto ou conter o PID de uma execução anterior: use o PID da resposta para inspeção.
+`get_run_status()` retorna um objeto JSON com quatro campos:
+
+- `run`: o conteúdo de `status.json` da execução reservada ou, sem reserva, da mais recente; `null` se ela ainda não publicou estado.
+- `reservation_state`: `active`, `none` ou `incomplete` (reserva em criação).
+- `reservation`: `run_id`, `pid` e `stop_requested` da reserva ativa, ou `null`.
+- `log`: as últimas linhas do log do worker lançado pelo MCP.
+
+Se a reserva for removida durante a consulta, `reservation_state` volta a `none`. `submit_plan` responde com um texto iniciado por `Erro:` quando a entrada é inválida ou já existe execução reservada, sem iniciar nada; falhas ao lançar o worker são reportadas como erro da ferramenta. Se não conseguir gravar `pid.txt` após iniciar o worker, `submit_plan` confirma o início e retorna um aviso com o PID correto; a execução continua e a reserva permanece sob controle do worker. Nesse caso, `pid.txt` pode estar ausente ou incompleto: use o PID da resposta para inspeção.
 
 As atualizações de estado substituem o JSON de forma atômica. Se uma consulta no Windows bloquear a substituição do JSON ou a remoção de `run.lock`, o processo tenta novamente por até um segundo. Antes de cada tentativa de remoção, ele confere a identidade da reserva. Se a primeira gravação de `starting` falhar, o diagnóstico da nova execução usa listas de tarefas e detalhes vazias. Uma recuperação já exigida mantém a reserva mesmo se houver erro ao salvar o estado final ou ao ler o estado da execução em curso.
 
@@ -169,7 +176,7 @@ Em `details.<id>`, `commit` identifica o candidato do worktree e `target_before`
 
 Se a gravação da aprovação falhar, a execução para e mantém a reserva. Quando o armazenamento volta a aceitar a escrita do diagnóstico, o status registra a tarefa aprovada, o SHA integrado e a necessidade de recuperação manual. Se o erro persistir, consulte o último status gravado e confira `integrated_commit` no histórico da branch antes de reenviar a tarefa.
 
-Worktrees ficam em `.agent-runs/runs/<identificador-da-execução>/wt-<id>`. Cada execução tem seu próprio diretório e branches únicas; IDs de tarefas podem ser reutilizados. Os worktrees são preservados para inspeção. CLI e MCP atualizam `submitted-plan.json` de forma atômica, sob a reserva de execução, antes da preparação dos workers. `get_submitted_plan()` retorna esse plano, inclusive se a preparação falhar. Uma execução recusada por reserva ativa não substitui o plano existente. `status.json` e o plano salvo mostram a execução mais recente; o log do MCP é sobrescrito a cada submissão MCP e não é atualizado pela CLI.
+Worktrees ficam em `.agent-runs/runs/<identificador-da-execução>/wt-<id>`. Cada execução tem seu próprio diretório e branches únicas; IDs de tarefas podem ser reutilizados. Os worktrees são preservados para inspeção. O mesmo diretório guarda `status.json`, `plan.json`, `run.log` e `pid.txt` (os dois últimos apenas em execuções iniciadas pelo MCP), o marcador `claim` do worker que assumiu a execução e, quando houver pedido de encerramento, o arquivo `stop`. `.agent-runs/latest-run` aponta para a execução mais recente. CLI e MCP gravam `plan.json` de forma atômica, sob a reserva de execução, antes da preparação dos workers. `get_submitted_plan()` retorna esse plano, inclusive se a preparação falhar. Uma execução recusada por reserva ativa não substitui o plano existente. Os registros de execuções anteriores permanecem em seus diretórios e podem ser removidos manualmente depois de inspecionados.
 
 No Windows, o runner cria cada comando suspenso, associa-o a um Job Object exclusivo e só então libera sua execução. Ao terminar, inclusive em timeout ou cancelamento, o runner encerra os descendentes e confirma que o Job ficou vazio. Se a associação falhar, o comando é encerrado ainda suspenso. O módulo `windows_job.py` deve acompanhar `orchestrator.py` e usa a dependência `pywin32`.
 
@@ -185,7 +192,7 @@ A branch e o commit de destino são conferidos antes de cada integração e no e
 
 Após encerramento abrupto:
 
-1. Leia `.agent-runs/run.log`, `status.json` e `pid.txt` (PID do worker MCP). Se a submissão avisou que não conseguiu gravar `pid.txt`, use o PID informado na resposta do MCP. Confirme no Gerenciador de Tarefas que o worker e seus subprocessos terminaram. A reserva também registra o PID do processo que a criou, que no MCP é o servidor.
+1. Leia `run.log`, `status.json` e `pid.txt` (PID do worker MCP) em `.agent-runs/runs/<run_id>/`; o `run_id` está em `.agent-runs/run.lock`. Se a submissão avisou que não conseguiu gravar `pid.txt`, use o PID informado na resposta do MCP. Confirme no Gerenciador de Tarefas que o worker e seus subprocessos terminaram. A reserva também registra o PID do processo que a criou, que no MCP é o servidor.
 2. Inspecione `git status`, `git log -5 --oneline` e `git worktree list`. Preserve alterações e resolva operações Git pendentes antes de começar outra execução. Não há retomada automática.
 3. **Somente após confirmar que não há execução ativa**, remova a reserva com `Remove-Item -LiteralPath .agent-runs/run.lock`. Não remova uma reserva ativa.
 4. Corrija a causa, confira a branch e o Git limpo, ajuste o plano se necessário e submeta novamente.

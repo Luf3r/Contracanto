@@ -2,7 +2,6 @@
 
 import concurrent.futures
 import contextlib
-import json
 import os
 import subprocess
 import threading
@@ -48,7 +47,7 @@ class RecoveryInterruptionTests(unittest.TestCase):
                             runner.execute(ws, {}, 1, 0, ['test'])
                     except KeyboardInterrupt:
                         self.fail('Cleanup interruption escaped without preserving recovery')
-                    state = json.loads((store / 'status.json').read_text())
+                    state = support.read_status(ws)
                     self.assertEqual(state['state'], 'failed')
                     self.assertTrue(state['recovery_required'])
                     self.assertTrue((store / 'run.lock').exists())
@@ -97,7 +96,7 @@ class RecoveryInterruptionTests(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         runner.execute(ws, {'tasks': tasks}, 2, 0, ['test'])
                     self.assertTrue(finished.is_set())
-                    state = json.loads((store / 'status.json').read_text())
+                    state = support.read_status(ws)
                     self.assertEqual(state['state'], 'failed')
                     self.assertTrue(state['recovery_required'])
                     self.assertTrue((store / 'run.lock').exists())

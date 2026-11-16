@@ -1,7 +1,6 @@
 """Windows process cleanup must not depend on taskkill's racy exit status."""
 
 import concurrent.futures
-import json
 import os
 import subprocess
 import sys
@@ -128,7 +127,7 @@ class WindowsProcessTests(unittest.TestCase):
                 with self.assertRaises(errors.RecoveryRequired):
                     runner.execute(ws, {}, 1, 0, ['test'])
                 self.assertTrue((store / 'run.lock').exists())
-                self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                self.assertTrue(support.read_status(ws)['recovery_required'])
 
     def test_failed_termination_closes_job_before_waiting_for_child_pipes(self):
         from contracanto import windows_job as w

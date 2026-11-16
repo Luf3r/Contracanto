@@ -85,7 +85,7 @@ class WorkflowTests(unittest.TestCase):
                     plan['goal'] = goal
                 states = runner.execute(ws, plan, 2, 1, [sys.executable, 'check.py'])
             self.assertEqual(states, {'A': 'approved', 'B': 'approved', 'C': 'approved'})
-            self.assertEqual(json.loads((store / 'status.json').read_text())['state'], 'completed')
+            self.assertEqual(support.read_status(ws)['state'], 'completed')
             self.assertIn('revised', git('log', '--oneline').stdout)
             for name in ('ação espaço.txt', 'B.txt', 'C.txt'):
                 self.assertEqual((root / name).read_text(), 'ok\n')

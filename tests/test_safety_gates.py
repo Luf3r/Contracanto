@@ -39,7 +39,7 @@ class SafetyGateTests(unittest.TestCase):
             ):
                 states = runner.execute(self.ws, {'tasks': tasks}, 2, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'approved', 'B': 'failed'})
-            details = json.loads((store / 'status.json').read_text())['details']
+            details = support.read_status(self.ws)['details']
             self.assertIn('new/b.txt', details['B']['error'])
             self.assertEqual(details['A']['integrated_commit'], git('rev-parse', 'HEAD').stdout.strip())
             candidate = git('rev-parse', 'HEAD', cwd=details['A']['worktree']).stdout.strip()
@@ -69,7 +69,7 @@ class SafetyGateTests(unittest.TestCase):
                     runner.execute(self.ws, {'tasks': [task, second]}, 1, 0, [sys.executable, '-c', 'pass'])
                 self.assertTrue(failed)
                 self.assertTrue((store / 'run.lock').exists())
-                state = json.loads((store / 'status.json').read_text())
+                state = support.read_status(self.ws)
                 self.assertEqual(state['details']['A']['integrated_commit'], git('rev-parse', 'HEAD').stdout.strip())
                 if not persistent:
                     self.assertTrue(state['recovery_required'])
@@ -88,7 +88,7 @@ class SafetyGateTests(unittest.TestCase):
                 self.assertEqual(states, {'A': 'failed'})
                 self.assertEqual((root / 'outside.txt').read_text(), 'modified')
                 self.assertTrue((store / 'run.lock').exists())
-                self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                self.assertTrue(support.read_status(self.ws)['recovery_required'])
                 self.assertEqual(
                     git('ls-files', '-v', 'outside.txt').stdout[0], 'h' if flag == '--assume-unchanged' else 'S'
                 )
@@ -190,7 +190,7 @@ class SafetyGateTests(unittest.TestCase):
             self.assertEqual(result, {'A': 'failed'})
             self.assertEqual((root / 'outside.txt').read_bytes(), b'local diagnostic')
             self.assertTrue((store / 'run.lock').exists())
-            self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+            self.assertTrue(support.read_status(self.ws)['recovery_required'])
 
     def test_integration_detects_dirty_submodule_with_ignore_all(self):
         with self.repository() as (root, store, base, task, git):
@@ -209,7 +209,7 @@ class SafetyGateTests(unittest.TestCase):
             result = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
             self.assertEqual(result, {'A': 'failed'})
             self.assertEqual((vendor / 'outside.txt').read_text(), 'dirty')
-            self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+            self.assertTrue(support.read_status(self.ws)['recovery_required'])
             self.assertTrue((store / 'run.lock').exists())
 
     def test_interrupt_after_successful_pick_keeps_unverified_commit_reserved(self):
@@ -233,7 +233,7 @@ class SafetyGateTests(unittest.TestCase):
                     pass
             self.assertNotEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
             self.assertTrue((store / 'run.lock').exists())
-            state = json.loads((store / 'status.json').read_text())
+            state = support.read_status(self.ws)
             self.assertTrue(state['recovery_required'])
             self.assertNotIn('approved', state['statuses'].values())
 
@@ -250,7 +250,7 @@ class SafetyGateTests(unittest.TestCase):
                 except errors.RecoveryRequired:
                     pass
             self.assertTrue((store / 'run.lock').exists())
-            state = json.loads((store / 'status.json').read_text())
+            state = support.read_status(self.ws)
             self.assertTrue(state['recovery_required'])
             self.assertEqual(state['statuses'], {'A': 'failed'})
             self.assertEqual(state['details']['A']['error'], 'executor failed')
@@ -272,7 +272,7 @@ class SafetyGateTests(unittest.TestCase):
             self.assertEqual(result, {'A': 'failed'})
             self.assertEqual(len(repairs), 1)
             self.assertIn('missing expected record', repairs[0])
-            state = json.loads((store / 'status.json').read_text())
+            state = support.read_status(self.ws)
             self.assertIn('missing expected record', state['details']['A']['error'])
 
     @contextlib.contextmanager
@@ -374,7 +374,7 @@ class SafetyGateTests(unittest.TestCase):
             result = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
             self.assertEqual(result, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
-            self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+            self.assertTrue(support.read_status(self.ws)['recovery_required'])
             self.assertEqual(git('rev-parse', 'MERGE_HEAD').stdout, git('rev-parse', 'side').stdout)
 
     def test_reviewer_receives_applicable_binary_patch(self):
@@ -419,7 +419,7 @@ class SafetyGateTests(unittest.TestCase):
             states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
-            self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+            self.assertTrue(support.read_status(self.ws)['recovery_required'])
 
     def test_full_candidate_diff_is_checked_before_review(self):
         with self.repository() as (root, store, base, task, git):
@@ -442,7 +442,7 @@ class SafetyGateTests(unittest.TestCase):
                 states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
-            self.assertIn('fora do escopo', json.loads((store / 'status.json').read_text())['details']['A']['error'])
+            self.assertIn('fora do escopo', support.read_status(self.ws)['details']['A']['error'])
 
     def test_tests_cannot_replace_head_even_with_clean_working_tree(self):
         with self.repository() as (root, store, base, task, git):
@@ -464,7 +464,7 @@ class SafetyGateTests(unittest.TestCase):
                 states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
                 self.assertEqual(states, {'A': 'failed'})
                 self.assertTrue((store / 'run.lock').exists())
-                self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                self.assertTrue(support.read_status(self.ws)['recovery_required'])
                 self.assertEqual((root / 'outside.txt').read_text(), 'changed by tests\n')
                 with self.assertRaises(RuntimeError):
                     st.reserve_run(self.ws)
@@ -505,7 +505,7 @@ class SafetyGateTests(unittest.TestCase):
                     self.assertTrue(failed, 'The intended Git read must have failed')
                     self.assertEqual(states, {'A': 'failed', 'B': 'blocked'})
                     self.assertTrue((store / 'run.lock').exists())
-                    self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                    self.assertTrue(support.read_status(self.ws)['recovery_required'])
                     self.assertEqual((root / 'outside.txt').read_text(), 'changed by integration tests\n')
                     self.assertNotIn('Revert', git('log', '--format=%s').stdout)
                     with self.assertRaises(RuntimeError):
@@ -528,7 +528,7 @@ class SafetyGateTests(unittest.TestCase):
                 states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
-            self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+            self.assertTrue(support.read_status(self.ws)['recovery_required'])
             self.assertTrue((root / 'allowed.txt').exists())
             self.assertNotIn('Revert', git('log', '--format=%s').stdout)
 
@@ -549,7 +549,7 @@ class SafetyGateTests(unittest.TestCase):
                 self.assertEqual(git('rev-parse', 'HEAD').stdout.strip(), base)
                 self.assertEqual(git('rev-parse', 'main').stdout.strip(), base)
                 self.assertTrue((store / 'run.lock').exists())
-                self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                self.assertTrue(support.read_status(self.ws)['recovery_required'])
 
     def test_tests_cannot_switch_branch_at_the_same_commit(self):
         with self.repository() as (root, store, base, task, git):
@@ -591,7 +591,7 @@ class SafetyGateTests(unittest.TestCase):
                         self.fail('Branch change escaped without requiring recovery')
                 self.assertEqual(states, {'A': 'failed', 'B': 'blocked'})
                 self.assertTrue((store / 'run.lock').exists())
-                self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+                self.assertTrue(support.read_status(self.ws)['recovery_required'])
                 self.assertNotEqual(git('rev-parse', 'main').stdout.strip(), base)
                 self.assertEqual(git('rev-parse', 'HEAD').stdout, git('rev-parse', 'main').stdout)
                 self.assertNotIn('Revert', git('log', '--all', '--format=%s').stdout)
@@ -615,7 +615,7 @@ class SafetyGateTests(unittest.TestCase):
                 states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', code])
             self.assertEqual(states, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
-            self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+            self.assertTrue(support.read_status(self.ws)['recovery_required'])
             self.assertNotIn('Revert', git('log', '--format=%s').stdout)
 
     def test_branch_is_rechecked_before_rollback(self):
@@ -633,7 +633,7 @@ class SafetyGateTests(unittest.TestCase):
                 states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'])
             self.assertEqual(states, {'A': 'failed'})
             self.assertTrue((store / 'run.lock').exists())
-            self.assertTrue(json.loads((store / 'status.json').read_text())['recovery_required'])
+            self.assertTrue(support.read_status(self.ws)['recovery_required'])
             self.assertNotIn('Revert', git('log', '--all', '--format=%s').stdout)
 
     def test_unchanged_detached_head_can_integrate(self):

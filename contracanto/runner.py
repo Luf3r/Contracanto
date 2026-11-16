@@ -32,9 +32,10 @@ def execute(
     run_id = state.reservation_id(token)
     if not state.owns_reservation(ws, run_id):
         raise RuntimeError('Reserva de execução inválida')
-    # mkdir is the single-use handoff. A losing worker must never enter cleanup.
+    # The claim mkdir is the single-use handoff. A losing worker must never enter cleanup.
     try:
-        ws.run_dir(run_id).mkdir(parents=True)
+        ws.run_dir(run_id).mkdir(parents=True, exist_ok=True)
+        ws.claim(run_id).mkdir()
     except FileExistsError:
         raise RuntimeError('Reserva já assumida por outro worker') from None
     except (OSError, KeyboardInterrupt) as error:
@@ -46,11 +47,12 @@ def execute(
     keep_lock = False
     try:
         # CLI e MCP começam com estado próprio antes de qualquer preparação.
+        ws.publish_run(run_id)
         run.save()
         if isinstance(plan, Path):
             plan = json.loads(plan.read_text(encoding='utf-8'))
         # Publish the current CLI or MCP plan only after proving lock ownership.
-        state.write_json(ws.plan, plan)
+        state.write_json(ws.plan(run_id), plan)
         ctx.stop.check()
         result = _execute(ctx, plan, max_workers, retries, tests)
         keep_lock = run.recovery_required
