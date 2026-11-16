@@ -6,6 +6,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
@@ -16,96 +17,91 @@ from . import config
 from .errors import RecoveryRequired, describe
 from .state import StopSignal
 
-if os.name == 'nt':
-    from .windows_job import WindowsJob
-
 # text: stdout e stderr decodificados com substituição.
 # nul: caminhos Git delimitados por NUL; stdout precisa ser UTF-8 exato.
 # binary: stdout em bytes, sem tradução de quebras de linha.
 Output = Literal['text', 'nul', 'binary']
 
+if sys.platform == 'win32':
+    from .windows_job import WindowsJob
 
-def kill_posix_group(pid: int) -> None:
-    # communicate() may already have reaped the leader.
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(pid, signal.SIGKILL)
+    class _Containment:
+        """Um Job Object por comando; fechar o job encerra os descendentes."""
 
+        def __enter__(self) -> _Containment:
+            self._manager = WindowsJob()
+            self._job = self._manager.__enter__()
+            return self
 
-def wait_posix_group(pid: int) -> None:
-    deadline = time.monotonic() + config.PROCESS_EXIT_TIMEOUT
-    while True:
-        try:
-            os.killpg(pid, 0)
-        except ProcessLookupError:
-            return
-        if time.monotonic() >= deadline:
-            raise RecoveryRequired('Encerramento do grupo de processos não confirmado')
-        time.sleep(0.02)
+        def __exit__(self, *exc: object) -> None:
+            return self._manager.__exit__(*exc)
 
+        def popen_options(self) -> dict[str, Any]:
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW | WindowsJob.creationflags
+            return {'creationflags': flags}
 
-class _PosixGroup:
-    """Um grupo de processos por comando."""
+        def start(self, process: subprocess.Popen) -> None:
+            self._job.start(process.pid)
 
-    def __enter__(self) -> _PosixGroup:
-        return self
+        def terminate(self) -> None:
+            self._job.terminate()
 
-    def __exit__(self, *exc: object) -> None:
-        return None
+        def abort(self, process: subprocess.Popen) -> None:
+            self._job.terminate()
+            # Assignment may have failed while the root was suspended.
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=config.PROCESS_EXIT_TIMEOUT)
 
-    def popen_options(self) -> dict[str, Any]:
-        return {'start_new_session': True}
-
-    def start(self, process: subprocess.Popen) -> None:
-        self._pid = process.pid
-
-    def terminate(self) -> None:
-        kill_posix_group(self._pid)
-        wait_posix_group(self._pid)
-
-    def abort(self, process: subprocess.Popen) -> None:
-        kill_posix_group(process.pid)
-        process.communicate(timeout=config.PROCESS_EXIT_TIMEOUT)
-        wait_posix_group(process.pid)
-
-
-class _WindowsContainment:
-    """Um Job Object por comando; fechar o job encerra os descendentes."""
-
-    def __enter__(self) -> _WindowsContainment:
-        self._manager = WindowsJob()
-        self._job = self._manager.__enter__()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        return self._manager.__exit__(*exc)
-
-    def popen_options(self) -> dict[str, Any]:
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW | WindowsJob.creationflags
-        return {'creationflags': flags}
-
-    def start(self, process: subprocess.Popen) -> None:
-        self._job.start(process.pid)
-
-    def terminate(self) -> None:
-        self._job.terminate()
-
-    def abort(self, process: subprocess.Popen) -> None:
-        self._job.terminate()
-        # Assignment may have failed while the root was suspended.
-        if process.poll() is None:
-            process.kill()
-        process.communicate(timeout=config.PROCESS_EXIT_TIMEOUT)
-
-
-def _containment() -> _PosixGroup | _WindowsContainment:
-    return _WindowsContainment() if os.name == 'nt' else _PosixGroup()
-
-
-def detached_options() -> dict[str, Any]:
-    """Opções de Popen para um worker que sobrevive ao processo que o lançou."""
-    if os.name == 'nt':
+    def detached_options() -> dict[str, Any]:
+        """Opções de Popen para um worker que sobrevive ao processo que o lançou."""
         return {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
-    return {'start_new_session': True}
+
+else:
+
+    def kill_posix_group(pid: int) -> None:
+        # communicate() may already have reaped the leader.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pid, signal.SIGKILL)
+
+    def wait_posix_group(pid: int) -> None:
+        deadline = time.monotonic() + config.PROCESS_EXIT_TIMEOUT
+        while True:
+            try:
+                os.killpg(pid, 0)
+            except ProcessLookupError:
+                return
+            if time.monotonic() >= deadline:
+                raise RecoveryRequired('Encerramento do grupo de processos não confirmado')
+            time.sleep(0.02)
+
+    class _Containment:
+        """Um grupo de processos por comando."""
+
+        def __enter__(self) -> _Containment:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def popen_options(self) -> dict[str, Any]:
+            return {'start_new_session': True}
+
+        def start(self, process: subprocess.Popen) -> None:
+            self._pid = process.pid
+
+        def terminate(self) -> None:
+            kill_posix_group(self._pid)
+            wait_posix_group(self._pid)
+
+        def abort(self, process: subprocess.Popen) -> None:
+            kill_posix_group(process.pid)
+            process.communicate(timeout=config.PROCESS_EXIT_TIMEOUT)
+            wait_posix_group(process.pid)
+
+    def detached_options() -> dict[str, Any]:
+        """Opções de Popen para um worker que sobrevive ao processo que o lançou."""
+        return {'start_new_session': True}
 
 
 def _communicate(process: subprocess.Popen, input_data, timeout: float, stop: StopSignal | None, args):
@@ -144,7 +140,7 @@ def run(
     raw = output != 'text'
     # Close the containment before Popen's pipe cleanup: surviving children may
     # still hold those pipes open if explicit termination failed.
-    with contextlib.ExitStack() as resources, _containment() as containment:
+    with contextlib.ExitStack() as resources, _Containment() as containment:
         process = None
         stdin: Any = subprocess.PIPE
         if stop is not None:

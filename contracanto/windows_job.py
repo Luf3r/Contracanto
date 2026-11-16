@@ -1,6 +1,7 @@
 """Contain a suspended Windows subprocess and its descendants in a Job Object."""
 
 import ctypes
+import sys
 import time
 from ctypes import wintypes
 
@@ -8,6 +9,8 @@ import win32api
 import win32con
 import win32job
 import win32process
+
+assert sys.platform == 'win32', 'Job Objects existem apenas no Windows'
 
 
 class _ThreadEntry(ctypes.Structure):

@@ -50,12 +50,11 @@ def execute(
         # CLI e MCP começam com estado próprio antes de qualquer preparação.
         ws.publish_run(run_id)
         run.save()
-        if isinstance(plan, Path):
-            plan = json.loads(plan.read_text(encoding='utf-8'))
+        loaded: Plan = json.loads(plan.read_text(encoding='utf-8')) if isinstance(plan, Path) else plan
         # Publish the current CLI or MCP plan only after proving lock ownership.
-        state.write_json(ws.plan(run_id), plan)
+        state.write_json(ws.plan(run_id), loaded)
         ctx.stop.check()
-        result = _execute(ctx, plan, max_workers, retries, tests)
+        result = _execute(ctx, loaded, max_workers, retries, tests)
         keep_lock = run.recovery_required
         run.state = 'completed' if all(status == 'approved' for status in result.values()) else 'failed'
         run.save()
@@ -204,9 +203,9 @@ def run_batch(ctx: RunContext, batch: Sequence[Task], base: str, context: str, m
         with recovery_on_failure('Espera dos workers interrompida; encerramento não confirmado'):
             pool.shutdown(wait=True)
         for future, task in jobs.items():
-            error = future.exception()
-            if error is not None:
-                record_failure(task, error)
+            failure = future.exception()
+            if failure is not None:
+                record_failure(task, failure)
         if recovery_error is not None:
             raise RecoveryRequired(
                 f'Execução interrompida com recuperação pendente: {recovery_error}'
@@ -277,7 +276,7 @@ def integrate(
     task = artifact.task
     details = run.details[task['id']]
     target.verify()
-    candidate = artifact.commit
+    candidate = artifact.candidate
     # Earlier tasks in a parallel batch may have changed the destination tree.
     # Inspect the actual three-way merge.
     if target.head == base:

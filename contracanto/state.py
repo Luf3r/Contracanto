@@ -8,7 +8,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -112,7 +112,7 @@ def retry_permission_error(operation: Callable[..., Any], *args: Any) -> Any:
             time.sleep(0.05)
 
 
-def write_json(path: Path, obj: dict[str, Any]) -> None:
+def write_json(path: Path, obj: Mapping[str, Any]) -> None:
     tmp = path.with_suffix('.tmp')
     try:
         tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding='utf-8')

@@ -75,7 +75,7 @@ def hidden_index_changes(wt: str | Path) -> list[str]:
     """Inspect masked entries against HEAD without changing the user's index flags."""
     masked = set()
     skipped = set()
-    changes = []
+    changes: list[str] = []
     for entry in git_records('ls-files', '-v', '--stage', '-z', cwd=wt):
         metadata, name = entry.split('\t', 1)
         tag, mode, *_ = metadata.split()
@@ -160,19 +160,20 @@ def protect_untracked_files(root: Path, before: str, after: str) -> None:
         'diff', '--name-only', '--diff-filter=AT', '--no-renames', ALL_SUBMODULES, '-z', before, after, cwd=root
     )
     for name in added:
-        path: Path | None = root
+        path = root
+        exists = True
         for part in name.split('/'):
             path = path / part
             try:
                 mode = path.lstat().st_mode
             except FileNotFoundError:
-                path = None
+                exists = False
                 break
             if path.is_junction() or (stat.S_ISDIR(mode) and (path / '.git').exists()):
                 raise RuntimeError(f'Integração atingiria uma junção ou repositório local: {path}')
             if not stat.S_ISDIR(mode):
                 break
-        if path is None:
+        if not exists:
             continue
         # No exclusion options: Git includes ignored files and nested repositories.
         # Match the on-disk spelling even on case-insensitive filesystems.

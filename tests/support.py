@@ -2,11 +2,15 @@
 
 import contextlib
 import json
+import subprocess
+import sys
 import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from contracanto import gitops, state
+from contracanto import agents, errors, gitops, runner, state
+from contracanto import process as proc
 
 # Dentro do projeto e ignorado pelo Git: mesmo volume e sem caminhos curtos do Windows.
 TEMP_PARENT = Path(__file__).resolve().parent.parent / '.agent-runs'
@@ -71,3 +75,63 @@ def publish_previous_run(ws, status, run_id='a' * 64):
     ws.publish_run(run_id)
     ws.status(run_id).write_text(json.dumps(dict(status, run_id=run_id)), encoding='utf-8')
     return run_id
+
+
+class RepositoryTestCase(unittest.TestCase):
+    """Repositório Git real com agente, revisor e testes simulados."""
+
+    @contextlib.contextmanager
+    def repository(self, agent_commit=None, mutate_tests=None, test_exit=0):
+        with temp_dir() as directory:
+            root = Path(directory).resolve()
+            original_cmd = proc.run
+
+            git = init_repository(root)
+            (root / 'outside.txt').write_text('original\n')
+            git('add', '.')
+            git('commit', '-m', 'baseline')
+            base = git('rev-parse', 'HEAD').stdout.strip()
+            store = root / '.agent-runs'
+            store.mkdir()
+            calls = {'agent': 0, 'review': 0}
+
+            def agent(prompt, wt, stop=None):
+                calls['agent'] += 1
+                if calls['agent'] == agent_commit:
+                    (wt / 'outside.txt').write_text('unauthorized\n')
+                    git('add', 'outside.txt', cwd=wt)
+                    git('commit', '-m', 'unexpected agent commit', cwd=wt)
+                (wt / 'allowed.txt').write_text(str(calls['agent']))
+                return 'done'
+
+            def command(args, **kwargs):
+                kwargs.setdefault('cwd', root)
+                if args[0] == 'claude':
+                    calls['review'] += 1
+                    verdict = 'REJECTED' if agent_commit == 2 and calls['review'] == 1 else 'APPROVED'
+                    return subprocess.CompletedProcess(args, 0, json.dumps({'result': verdict}), '')
+                if args[0] == sys.executable:
+                    in_main = Path(kwargs['cwd']) == root
+                    if mutate_tests == ('main' if in_main else 'worker'):
+                        (Path(kwargs['cwd']) / 'outside.txt').write_text('changed by tests\n')
+                        if test_exit == 'timeout':
+                            raise subprocess.TimeoutExpired(args, 600)
+                        if test_exit == 'cleanup':
+                            raise errors.RecoveryRequired('Subprocess termination not confirmed')
+                        return subprocess.CompletedProcess(args, test_exit, '', '')
+                return original_cmd(args, **kwargs)
+
+            task = dict(
+                id='A', description='Create allowed.txt', deps=[], files=['allowed.txt'], acceptance=['File exists']
+            )
+            with contextlib.ExitStack() as stack:
+                self.ws = workspace(store, root)
+                for module, name, value in [(gitops, 'git', git), (proc, 'run', command), (agents, 'run_agy', agent)]:
+                    stack.enter_context(patch.object(module, name, value))
+                stack.enter_context(patch.object(runner.shutil, 'which', return_value='fake-cli'))
+                try:
+                    yield root, store, base, task, git
+                finally:
+                    for wt in (store / 'runs').glob('*/wt-*'):
+                        # Preserve no test worktree registrations; dirty fixtures are disposable.
+                        git('worktree', 'remove', '--force', str(wt))

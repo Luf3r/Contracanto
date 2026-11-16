@@ -179,6 +179,6 @@ Nenhum módulo guarda estado global: o repositório e o diretório de execuçõe
 
 ## Dependências e validação de alterações
 
-`requirements.txt` fixa as dependências diretas; `requirements.lock.txt` fixa também as transitivas do ambiente validado, com `pywin32` restrito ao Windows. Use o lock na instalação e na CI. `requirements-dev.txt` traz o `ruff`; a CI executa `ruff check .` e `ruff format --check .` além dos testes. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
+`requirements.txt` fixa as dependências diretas; `requirements.lock.txt` fixa também as transitivas do ambiente validado, com `pywin32` restrito ao Windows. Use o lock na instalação e na CI. `requirements-dev.txt` traz o `ruff` e o `mypy`; a CI executa `ruff check .`, `ruff format --check .` e `mypy` além dos testes. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
 
 A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Retomada automática após crash e orçamento de tokens/custo continuam fora do escopo deste protótipo; a reserva e a recuperação manual continuam obrigatórias nesses casos.

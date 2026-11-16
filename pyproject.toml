@@ -18,3 +18,15 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Os testes usam closures em subTest, desempacotamento parcial e with aninhado por legibilidade.
 "tests/*" = ["B023", "RUF059", "SIM117", "SIM105", "SIM102"]
+
+[tool.mypy]
+files = ["contracanto", "orchestrator.py", "mcp_server.py"]
+python_version = "3.13"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# pywin32 não distribui tipos e só é instalado no Windows.
+module = ["win32api", "win32con", "win32job", "win32process"]
+ignore_missing_imports = true

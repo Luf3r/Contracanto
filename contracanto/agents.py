@@ -45,6 +45,12 @@ class Artifact:
     branch: str | None = None
     context: str = ''
 
+    @property
+    def candidate(self) -> str:
+        if self.commit is None:
+            raise RuntimeError(f'Tarefa {self.task["id"]} sem commit candidato')
+        return self.commit
+
 
 def _with_payload(instructions: str, payload: dict) -> str:
     return instructions + json.dumps(payload, ensure_ascii=False)
@@ -124,7 +130,7 @@ def repair(ctx: RunContext, artifact: Artifact, base: str, context: str, feedbac
     payload = {'task': task, 'context': context, 'review': feedback}
     correction = run_agy(_with_payload(REPAIR_PROMPT, payload), wt, ctx.stop)
     artifact.report += '\nCorreção: ' + correction
-    gitops.check_checkout(wt, artifact.commit, artifact.branch)
+    gitops.check_checkout(wt, artifact.candidate, artifact.branch)
     gitops.check_scope(task, wt, base)
     if gitops.changed_files(wt):
         gitops.commit_all(wt, f'agent: repair {task["id"]}')
