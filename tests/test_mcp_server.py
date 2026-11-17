@@ -337,3 +337,40 @@ class SubmissionTests(unittest.TestCase):
                     self.assertIn('PID 123', result)
                     self.assertTrue(ws.lock.exists())
                     self.assertEqual(support.read_status(ws)['state'], 'starting')
+
+
+class SubmissionPreflightTests(support.RepositoryTestCase):
+    def submit(self, **options):
+        with patch.object(server, 'WORKSPACE', self.ws), patch.object(server, 'subprocess') as fake:
+            fake.Popen.return_value.pid = 7
+            result = server.submit_plan(PLAN, test_command_json='["test"]', **options)
+        return result, fake.Popen
+
+    def test_unusable_repository_is_refused_without_reserving(self):
+        cases = {
+            'limpo': lambda root, git: (root / 'sujo.txt').write_text('x'),
+            'HEAD destacado': lambda root, git: git('switch', '--detach'),
+        }
+        for expected, prepare in cases.items():
+            with self.subTest(expected=expected), self.repository() as (root, store, base, task, git):
+                prepare(root, git)
+                result, launch = self.submit()
+                self.assertTrue(result.startswith('Erro: '), result)
+                self.assertIn(expected, result)
+                launch.assert_not_called()
+                self.assertFalse(self.ws.lock.exists())
+                self.assertEqual(self.ws.run_ids(), [])
+
+    def test_branch_name_is_checked_at_submission(self):
+        with self.repository() as (root, store, base, task, git):
+            for name, expected in (('main', 'já existe'), ('a..b', 'inválido')):
+                result, launch = self.submit(branch=name)
+                self.assertIn(expected, result)
+                launch.assert_not_called()
+            result, launch = self.submit(branch='lote')
+            self.assertIn('PID 7', result)
+            argv = launch.call_args.args[0]
+            self.assertEqual(argv[argv.index('--branch') + 1], 'lote')
+            # A branch só é criada pelo worker.
+            self.assertEqual(git('branch', '--list', 'lote').stdout.strip(), '')
+            st.release_run(self.ws, argv[argv.index('--reservation') + 1])

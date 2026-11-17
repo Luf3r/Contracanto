@@ -89,6 +89,11 @@ class ResumeTests(support.RepositoryTestCase):
                 st.write_json(self.ws.status(run_id), status)
                 with self.assertRaisesRegex(RuntimeError, f'A tarefa B .*{commit[:12]}'):
                     maintenance.resume_plan(self.ws)
+                # O operador pode afirmar que já desfez o commit de outra forma.
+                forced = maintenance.resume_plan(self.ws, force=True)
+                self.assertEqual([item['id'] for item in forced['tasks']], ['B', 'C'])
+                with self.assertRaisesRegex(RuntimeError, '--resume --force'):
+                    cli.main(['--resume', '--test', *PASS], self.ws)
                 # Depois do git revert, a tarefa pode ser refeita.
                 git('revert', '--no-edit', commit)
                 self.assertEqual([item['id'] for item in maintenance.resume_plan(self.ws)['tasks']], ['B', 'C'])

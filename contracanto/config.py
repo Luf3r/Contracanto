@@ -11,7 +11,10 @@ import json
 import os
 from collections.abc import Sequence
 
+from .errors import ConfigError
+
 ENV_PREFIX = 'CONTRACANTO_'
+
 
 MAX_TASKS = 100
 PARALLEL_RANGE = range(1, 9)
@@ -27,11 +30,11 @@ def _seconds(name: str, default: float, minimum: float = 0) -> float:
     try:
         value = float(raw)
     except ValueError:
-        raise ValueError(f'{ENV_PREFIX}{name} deve ser um número de segundos, recebido {raw!r}') from None
+        raise ConfigError(f'{ENV_PREFIX}{name} deve ser um número de segundos, recebido {raw!r}') from None
     if value <= 0:
-        raise ValueError(f'{ENV_PREFIX}{name} deve ser maior que zero, recebido {raw!r}')
+        raise ConfigError(f'{ENV_PREFIX}{name} deve ser maior que zero, recebido {raw!r}')
     if value < minimum:
-        raise ValueError(f'{ENV_PREFIX}{name} deve ser pelo menos {minimum:g}, recebido {raw!r}')
+        raise ConfigError(f'{ENV_PREFIX}{name} deve ser pelo menos {minimum:g}, recebido {raw!r}')
     return value
 
 
@@ -44,7 +47,7 @@ def _count(name: str, default: int, allowed: range) -> int:
     except ValueError:
         value = -1
     if value not in allowed:
-        raise ValueError(f'{ENV_PREFIX}{name} deve ser um inteiro de {allowed[0]} a {allowed[-1]}, recebido {raw!r}')
+        raise ConfigError(f'{ENV_PREFIX}{name} deve ser um inteiro de {allowed[0]} a {allowed[-1]}, recebido {raw!r}')
     return value
 
 
@@ -66,7 +69,7 @@ def _command(name: str, allow_empty: bool = False) -> list[str] | None:
         or not (value or allow_empty)
     ):
         expected = 'uma lista JSON de strings' if allow_empty else 'uma lista JSON não vazia de strings'
-        raise ValueError(f'{ENV_PREFIX}{name} deve ser {expected}, recebido {raw!r}')
+        raise ConfigError(f'{ENV_PREFIX}{name} deve ser {expected}, recebido {raw!r}')
     return value
 
 

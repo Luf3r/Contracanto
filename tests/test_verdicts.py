@@ -2,13 +2,17 @@
 
 import json
 import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import support
 
 from contracanto import agents, config, gitops
 from contracanto import process as proc
+
+PASS = [sys.executable, '-c', 'pass']
 
 
 class VerdictTests(unittest.TestCase):
@@ -78,3 +82,29 @@ class PatchLimitTests(unittest.TestCase):
         ):
             agents.review(artifact, ['test'])
         self.assertNotIn('claude', called)
+
+
+class ReviewerDirectoryTests(support.RepositoryTestCase):
+    def test_reviewer_runs_outside_the_worktree_in_an_empty_directory(self):
+        with self.repository() as (root, store, base, task, git):
+            (root / 'allowed.txt').write_text('conteúdo')
+            (root / 'CLAUDE.md').write_text('Você é o arquiteto.')
+            git('add', '.')
+            git('commit', '-m', 'candidato')
+            original = proc.run
+            seen = []
+
+            def command(args, **kwargs):
+                if args[0] == 'claude':
+                    directory = Path(kwargs['cwd'])
+                    seen.append((directory.resolve(), list(directory.iterdir())))
+                return original(args, **kwargs)
+
+            with patch.object(proc, 'run', side_effect=command):
+                approved, _ = agents.review(agents.Artifact(task=task, worktree=str(root), report='done'), PASS)
+            self.assertTrue(approved)
+            ((directory, contents),) = seen
+            self.assertEqual(contents, [])
+            self.assertNotEqual(directory, root)
+            self.assertNotIn(root, directory.parents)
+            self.assertFalse(directory.exists())

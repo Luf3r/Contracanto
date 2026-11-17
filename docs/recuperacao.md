@@ -17,7 +17,7 @@ O relatório completo é um objeto JSON com quatro campos:
 
 `worker_alive` é `false` quando o processo que deveria estar trabalhando na execução não existe mais: o worker que a assumiu ou, antes disso, o worker lançado pelo MCP ou o processo que criou a reserva. Nesse caso o estado gravado não muda mais, mesmo que diga `running`; siga [Após um encerramento abrupto](#após-um-encerramento-abrupto).
 
-O resumo de `wait_for_run` traz `run_id`, `state`, `statuses`, `task_errors` (o começo do erro de cada tarefa que falhou), `recovery_required`, `error`, `duration_seconds`, `reservation_state`, `worker_alive`, `stop_requested` e `timed_out`. A ferramenta retorna assim que a execução chega a um estado final, o worker morre ou não há execução reservada. Se o tempo pedido (1 a 600 segundos) acabar antes, `timed_out` vem `true` e basta chamar de novo. Pareceres, tempos por fase e log ficam só no relatório completo.
+O resumo de `wait_for_run` traz `run_id`, `state`, `statuses`, `target`, `task_errors` (o começo do erro de cada tarefa que falhou), `recovery_required`, `error`, `duration_seconds`, `reservation_state`, `worker_alive`, `stop_requested` e `timed_out`. A ferramenta retorna assim que a execução chega a um estado final, o worker morre ou não há execução reservada. Se o tempo pedido (1 a 600 segundos) acabar antes, `timed_out` vem `true` e basta chamar de novo. Pareceres, tempos por fase e log ficam só no relatório completo.
 
 ### Estados
 

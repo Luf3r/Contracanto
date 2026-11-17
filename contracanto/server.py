@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import config, maintenance, process, state
 from .plan import parse_command, validate
+from .runner import check_repository
 
 mcp = FastMCP('Contracanto')
 WORKSPACE = state.default_workspace()
@@ -112,8 +113,9 @@ def submit_plan(
     Forneça somente projetos, planos e comandos de teste confiáveis. O comando e o código
     testado rodam com as permissões locais do worker antes da revisão e após a integração.
     Podem acessar arquivos fora do worktree, credenciais e rede, inclusive para push ou deploy.
-    Entrada inválida ou execução já reservada retornam um texto iniciado por "Erro:" sem
-    iniciar nada. Falhas ao lançar o worker são reportadas como erro da ferramenta.
+    Entrada inválida, execução já reservada ou repositório que não pode receber a execução
+    (alterações pendentes, HEAD destacado sem branch, nome de branch inválido ou já usado)
+    retornam um texto iniciado por "Erro:" sem iniciar nada. Falhas ao lançar o worker são reportadas como erro da ferramenta.
     """
     try:
         plan, test, setup = _parse_submission(plan_json, parallel, retries, test_command_json, setup_command_json)
@@ -134,6 +136,8 @@ def _launch(
     """Reserva a execução e lança o worker destacado para um plano já validado."""
     ws = WORKSPACE
     try:
+        # O worker confere de novo; aqui o erro chega a quem submeteu sem criar uma execução.
+        check_repository(ws.root, branch.strip() or None)
         token = state.reserve_run(ws)
     except RuntimeError as error:
         return f'Erro: {error}'
@@ -232,7 +236,8 @@ async def wait_for_run(timeout_seconds: int = 120) -> str:
     Retorna assim que a execução chega a um estado final, o worker morre ou não há execução
     reservada; caso contrário, depois de timeout_seconds (1 a 600), com timed_out true. Nesse
     caso chame de novo. Mantenha timeout_seconds abaixo do tempo limite de ferramentas do cliente.
-    O resumo traz run_id, state, statuses, task_errors, recovery_required, error,
+    O resumo traz run_id, state, statuses, target (branch de destino e commit de partida),
+    task_errors, recovery_required, error,
     duration_seconds, reservation_state, worker_alive e stop_requested. Para pareceres, tempos
     por fase e log, use get_run_status.
     """

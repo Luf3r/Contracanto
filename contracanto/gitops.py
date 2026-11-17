@@ -287,10 +287,17 @@ def is_top_level(root: Path) -> bool:
     return not git('rev-parse', '--show-prefix', cwd=root).stdout.strip()
 
 
-def create_branch(root: Path, name: str) -> None:
-    """Cria `name` no commit atual e passa o checkout para ela."""
+def check_new_branch(root: Path, name: str) -> None:
+    """`name` precisa ser um nome de branch válido e ainda não usado."""
     if git('check-ref-format', '--branch', name, cwd=root, check=False).returncode:
         raise RuntimeError(f'Nome de branch inválido: {name}')
+    if git('rev-parse', '--verify', '--quiet', f'refs/heads/{name}', cwd=root, check=False).returncode == 0:
+        raise RuntimeError(f'A branch {name} já existe; informe um nome novo')
+
+
+def create_branch(root: Path, name: str) -> None:
+    """Cria `name` no commit atual e passa o checkout para ela."""
+    check_new_branch(root, name)
     created = git('switch', '-c', name, cwd=root, check=False)
     if created.returncode:
         raise RuntimeError(f'Não foi possível criar a branch {name}: {created.stderr.strip()[-config.ERROR_TAIL :]}')

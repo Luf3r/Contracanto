@@ -34,13 +34,16 @@ def context(ws, run_id='test-run'):
 
 @contextlib.contextmanager
 def temp_workspace(server=None):
-    """Workspace isolado; com `server`, as ferramentas MCP passam a usá-lo."""
+    """Workspace isolado; com `server`, as ferramentas MCP passam a usá-lo.
+
+    O diretório não é um repositório Git, então a conferência feita na submissão é dispensada.
+    """
     with temp_dir() as directory:
         ws = workspace(directory)
         if server is None:
             yield ws
         else:
-            with patch.object(server, 'WORKSPACE', ws):
+            with patch.object(server, 'WORKSPACE', ws), patch.object(server, 'check_repository'):
                 yield ws
 
 

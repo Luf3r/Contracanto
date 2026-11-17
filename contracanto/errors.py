@@ -17,6 +17,10 @@ class IntegrationStateError(RecoveryRequired):
         super().__init__(f'Falha ao registrar a integração: {error}')
 
 
+class ConfigError(ValueError):
+    """Valor inválido em uma variável de ambiente CONTRACANTO_*."""
+
+
 class RunCancelled(RuntimeError):
     """O operador solicitou o encerramento desta execução."""
 

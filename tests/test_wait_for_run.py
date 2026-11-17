@@ -43,6 +43,7 @@ class WaitForRunTests(unittest.TestCase):
             time.sleep(0.3)
             run = st.RunState(ws.status(run_id), run_id)
             run.statuses = {'A': 'failed'}
+            run.target = {'branch': 'refs/heads/lote', 'base': 'abc', 'branch_removed': True}
             run.details = {'A': {'error': 'x' * 2000, 'review': 'parecer longo'}}
             run.finish('failed')
             run.save()
@@ -53,6 +54,7 @@ class WaitForRunTests(unittest.TestCase):
         worker.join()
         self.assertEqual((summary['state'], summary['timed_out']), ('failed', False))
         self.assertEqual(summary['statuses'], {'A': 'failed'})
+        self.assertEqual(summary['target'], {'branch': 'refs/heads/lote', 'base': 'abc', 'branch_removed': True})
         # O resumo corta os erros e deixa pareceres e log para get_run_status.
         self.assertEqual(len(summary['task_errors']['A']), maintenance.SUMMARY_ERROR_LIMIT)
         self.assertNotIn('parecer longo', json.dumps(summary))

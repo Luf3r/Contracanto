@@ -56,12 +56,51 @@ class CliErrorTests(unittest.TestCase):
         with support.temp_dir() as directory:
             code, stderr = self.run_cli(['--status', '--force', '--repo', str(directory)])
             self.assertEqual(code, 2)
-            self.assertIn('--prune-runs', stderr)
+            self.assertIn('--prune-runs ou --resume', stderr)
             (directory / 'plan.json').write_text('{}')
             argv = [str(directory / 'plan.json'), '--repo', str(directory), '--setup-json', 'npm ci', '--test', 'x']
             code, stderr = self.run_cli(argv)
             self.assertEqual(code, 2)
             self.assertIn('--setup-json', stderr)
+
+
+class UnusedOptionTests(unittest.TestCase):
+    def test_run_options_are_refused_with_other_actions(self):
+        cases = (['--status', '--test', 'x'], ['--stop', '--branch', 'b'], ['--unlock', '--keep-worktrees'])
+        for argv in cases:
+            with (
+                self.subTest(argv=argv),
+                support.temp_workspace() as ws,
+                redirect_stdout(StringIO()),
+                redirect_stderr(StringIO()) as stderr,
+                self.assertRaises(SystemExit) as exit,
+            ):
+                cli.main(argv, ws)
+            self.assertEqual(exit.exception.code, 2)
+            self.assertIn(argv[1], stderr.getvalue())
+            self.assertIn('só se aplica', stderr.getvalue())
+
+
+class InvalidSettingTests(unittest.TestCase):
+    def run_module(self, code, **env):
+        environment = dict(server.worker_env(), **env)
+        return subprocess.run([sys.executable, '-c', code], env=environment, capture_output=True, text=True)
+
+    def test_invalid_setting_is_a_one_line_error_in_both_commands(self):
+        for entry in ('main', 'serve'):
+            with self.subTest(entry=entry):
+                code = f'import sys; sys.argv = ["contracanto", "--status"]; from contracanto.__main__ import {entry}; {entry}()'
+                result = self.run_module(code, CONTRACANTO_TEST_TIMEOUT='abc')
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(len(result.stderr.strip().splitlines()), 1, result.stderr)
+                self.assertTrue(result.stderr.startswith('Erro: CONTRACANTO_TEST_TIMEOUT'), result.stderr)
+
+    def test_module_entry_point_still_runs_the_cli(self):
+        result = subprocess.run(
+            [sys.executable, '-m', 'contracanto', '--version'], env=server.worker_env(), capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('contracanto ', result.stdout)
 
 
 class VersionTests(unittest.TestCase):

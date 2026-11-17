@@ -46,7 +46,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--force',
         action='store_true',
-        help='Com --prune-runs: descarta também worktrees com alterações não salvas.',
+        help='Com --prune-runs: descarta também worktrees com alterações não salvas. Com --resume: retoma mesmo '
+        'com o commit de uma tarefa não aprovada no histórico, que você afirma já ter desfeito.',
     )
     parser.add_argument('--parallel', type=int, default=config.DEFAULT_PARALLEL)
     parser.add_argument('--retries', type=int, default=config.DEFAULT_RETRIES)
@@ -92,8 +93,21 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace, ws: sta
         ws = ws or state.default_workspace(args.repo)
     except ValueError as error:
         parser.error(str(error))
-    if args.force and args.prune_runs is None:
-        parser.error('--force só vale com --prune-runs')
+    if args.force and args.prune_runs is None and args.resume is None:
+        parser.error('--force só vale com --prune-runs ou --resume')
+    if args.plan is None and args.resume is None:
+        unused = [
+            name
+            for name, given in (
+                ('--test', args.test is not None),
+                ('--setup-json', args.setup_json),
+                ('--branch', args.branch),
+                ('--keep-worktrees', args.keep_worktrees),
+            )
+            if given
+        ]
+        if unused:
+            parser.error(f'{", ".join(unused)}: só se aplica ao executar ou retomar um plano')
     if args.stop:
         print(state.request_stop(ws))
         return
@@ -118,7 +132,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace, ws: sta
         setup = parse_command(args.setup_json, '--setup-json') if args.setup_json else None
         config.check_pinned(args.test, setup)
         if args.resume is not None:
-            plan = maintenance.resume_plan(ws, args.resume or None)
+            plan = maintenance.resume_plan(ws, args.resume or None, args.force)
         else:
             # Um worker lançado pelo MCP só lê o plano depois de assumir a reserva.
             plan = args.plan if args.reservation else json.loads(args.plan.read_text(encoding='utf-8'))

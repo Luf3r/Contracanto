@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import tempfile
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -289,25 +290,28 @@ def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | N
             'test_output': test_output,
         },
     )
-    response = process.run(
-        [
-            'claude',
-            '-p',
-            '--model',
-            config.REVIEW_MODEL,
-            '--output-format',
-            'json',
-            '--max-turns',
-            '1',
-            '--tools',
-            '',
-            '--strict-mcp-config',
-        ],
-        cwd=wt,
-        timeout=config.REVIEW_TIMEOUT,
-        input_data=prompt,
-        stop=stop,
-    )
+    # Fora do worktree: o revisor recebe tudo pelo pedido e não deve carregar as instruções
+    # que o projeto revisado guarda para outros papéis, como o CLAUDE.md do arquiteto.
+    with tempfile.TemporaryDirectory(prefix='contracanto-review-') as neutral:
+        response = process.run(
+            [
+                'claude',
+                '-p',
+                '--model',
+                config.REVIEW_MODEL,
+                '--output-format',
+                'json',
+                '--max-turns',
+                '1',
+                '--tools',
+                '',
+                '--strict-mcp-config',
+            ],
+            cwd=neutral,
+            timeout=config.REVIEW_TIMEOUT,
+            input_data=prompt,
+            stop=stop,
+        )
     verdict = parse_verdict(parse_claude_output(response.stdout))
     feedback = verdict.text
     if test.returncode:

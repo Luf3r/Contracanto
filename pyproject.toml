@@ -19,8 +19,8 @@ dependencies = [
 dev = ["ruff==0.17.5", "mypy==2.4.1"]
 
 [project.scripts]
-contracanto = "contracanto.cli:run"
-contracanto-mcp = "contracanto.server:main"
+contracanto = "contracanto.__main__:main"
+contracanto-mcp = "contracanto.__main__:serve"
 
 [tool.setuptools]
 packages = ["contracanto"]

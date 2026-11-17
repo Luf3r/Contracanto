@@ -404,7 +404,7 @@ class IntegrationGateTests(support.RepositoryTestCase):
             self.assertTrue((store / 'run.lock').exists())
 
     def test_invalid_or_existing_integration_branch_fails_the_preflight(self):
-        for name, expected in (('nome inválido..', 'inválido'), ('main', 'Não foi possível criar')):
+        for name, expected in (('nome inválido..', 'inválido'), ('main', 'já existe')):
             with self.subTest(name=name), self.repository() as (root, store, base, task, git):
                 with patch.object(agents, 'run_agy') as agent, self.assertRaisesRegex(RuntimeError, expected):
                     runner.execute(self.ws, {'tasks': [task]}, 1, 0, [sys.executable, '-c', 'pass'], branch=name)

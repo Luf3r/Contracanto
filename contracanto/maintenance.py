@@ -102,6 +102,7 @@ def summarize(report: dict[str, Any]) -> dict[str, Any]:
         'error': run.get('error'),
         'duration_seconds': run.get('duration_seconds'),
         'statuses': run.get('statuses') or {},
+        'target': run.get('target'),
         'task_errors': errors,
         'reservation_state': report['reservation_state'],
         'worker_alive': reservation.get('worker_alive'),
@@ -203,11 +204,13 @@ def unlock(ws: Workspace) -> str:
     return f'Reserva {run_id or "sem identificador"} removida. Uma nova execução pode ser iniciada.'
 
 
-def resume_plan(ws: Workspace, run_id: str | None = None) -> plan.Plan:
+def resume_plan(ws: Workspace, run_id: str | None = None, force: bool = False) -> plan.Plan:
     """Plano com as tarefas que não foram aprovadas em uma execução encerrada.
 
     Sem `run_id`, vale a execução mais recente. As dependências já aprovadas saem
     do plano, então cada uma delas precisa continuar no histórico do HEAD atual.
+    Com `force`, o operador afirma que já desfez o commit de qualquer tarefa não
+    aprovada que tenha chegado à branch.
     """
     if run_id is not None and not state.RUN_ID.fullmatch(run_id):
         raise RuntimeError(f'Identificador de execução inválido: {run_id}')
@@ -230,14 +233,16 @@ def resume_plan(ws: Workspace, run_id: str | None = None) -> plan.Plan:
         if statuses.get(task_id) != 'approved':
             # Um worker encerrado entre o cherry-pick e a aprovação deixa o commit na branch.
             if (
-                commit
+                not force
+                and commit
                 and not detail.get('revert_commit')
                 and gitops.contains_commit(ws.root, commit)
                 and not gitops.reverted(ws.root, commit)
             ):
                 raise RuntimeError(
                     f'A tarefa {task_id} não foi aprovada na execução {run_id[:12]}, mas o commit {commit[:12]} '
-                    'dela está no HEAD atual. Desfaça-o com git revert, ou submeta um plano novo sem a tarefa'
+                    'dela está no HEAD atual. Desfaça-o com git revert ou, se já o desfez de outra forma, '
+                    'retome pela linha de comando com --resume --force'
                 )
             continue
         if not commit or not gitops.contains_commit(ws.root, commit):

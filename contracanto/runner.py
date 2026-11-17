@@ -54,6 +54,27 @@ def resolve_command(command: Sequence[str], root: Path, label: str) -> list[str]
     return list(command)
 
 
+def check_repository(root: Path, branch: str | None = None) -> gitops.CheckoutState:
+    """Confere se o repositório pode receber uma execução e devolve o estado do checkout.
+
+    Vale para a submissão pelo MCP, que assim falha antes de reservar a execução,
+    e de novo para o worker, logo antes de começar.
+    """
+    if not gitops.is_top_level(root):
+        raise RuntimeError(f'{root} é um subdiretório do repositório Git; informe a raiz dele')
+    if gitops.changed_files(root):
+        raise RuntimeError('Repositório precisa estar limpo antes de executar')
+    current = gitops.checkout_state(root)
+    if branch:
+        gitops.check_new_branch(root, branch)
+    elif current.branch == 'HEAD':
+        raise RuntimeError(
+            'HEAD destacado: os commits integrados ficariam fora de qualquer branch. '
+            'Faça checkout de uma branch ou informe uma branch de integração (--branch)'
+        )
+    return current
+
+
 def execute(
     ws: Workspace,
     plan: Mapping[str, Any] | Path,
@@ -133,20 +154,11 @@ def _execute(
     tests = resolve_command(tests, ctx.root, 'Comando de testes')
     if ctx.setup:
         ctx.setup = resolve_command(ctx.setup, ctx.root, 'Comando de preparação')
-    if not gitops.is_top_level(ctx.root):
-        raise RuntimeError(f'{ctx.root} é um subdiretório do repositório Git; informe a raiz dele')
-    if gitops.changed_files(ctx.root):
-        raise RuntimeError('Repositório precisa estar limpo antes de executar')
-    origin = gitops.checkout_state(ctx.root)
+    origin = check_repository(ctx.root, ctx.branch)
     if ctx.branch:
         gitops.create_branch(ctx.root, ctx.branch)
         log.info('Branch de integração criada: %s', ctx.branch)
     target = TargetCheckout.current(ctx.root)
-    if target.branch == 'HEAD':
-        raise RuntimeError(
-            'HEAD destacado: os commits integrados ficariam fora de qualquer branch. '
-            'Faça checkout de uma branch ou informe uma branch de integração (--branch)'
-        )
     ctx.state.target = {'branch': target.branch, 'base': target.head}
     try:
         result = _run_tasks(ctx, plan, max_workers, retries, tests, target)
