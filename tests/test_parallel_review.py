@@ -14,7 +14,7 @@ class ParallelReviewTests(support.RepositoryTestCase):
     def test_reviews_run_together_and_integration_follows_implementation_order(self):
         with self.repository() as (root, store, base, task, git):
             tasks = [dict(task, id=tid, files=[f'{tid}.txt']) for tid in ('A', 'B')]
-            both_reviewing = threading.Barrier(2, timeout=10)
+            both_reviewing = threading.Barrier(2, timeout=60)
             original_review = agents.review
             integrated = []
             original_integrate = runner.integrate

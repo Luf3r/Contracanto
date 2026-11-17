@@ -63,7 +63,8 @@ class WorkflowTests(unittest.TestCase):
                     prompts.append((stage, data))
                     if args[0] == 'agy':
                         if stage == 'implementation' and data['task']['id'] in ('A', 'B'):
-                            barrier.wait(timeout=10)
+                            # Folga para runners lentos: a segunda tarefa ainda prepara o worktree.
+                            barrier.wait(timeout=60)
                     args = [sys.executable, str(root / 'fake_cli.py'), *args]
                 return original_cmd(args, **kwargs)
 
