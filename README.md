@@ -2,14 +2,14 @@
 
 Claude planeja e revisa. Antigravity implementa cada tarefa em um worktree Git. Um servidor MCP em Python coordena os dois e integra as mudanças após a revisão e os testes.
 
-**Protótipo de integração local**, desenvolvido e exercitado com os agentes reais no Windows; a suíte automatizada também roda em Linux. Cada máquina precisa validar suas credenciais e permissões. Não é solução de produção.
+Ferramenta de integração local, exercitada com os agentes reais no Windows (execução, branch de integração, retomada manual e automática); a suíte automatizada roda em Windows e Linux. Cada máquina precisa validar suas credenciais e permissões. A revisão é feita por um modelo e não substitui a sua: em um repositório real, integre em uma branch própria com `--branch` e revise antes de juntar ou publicar.
 
 ## Pré-requisitos
 - Windows, Python 3.13–3.15 e Git for Windows com suporte a `git merge-tree --write-tree` para integrar tarefas paralelas. Ambiente local validado: Python 3.15.2, MCP 1.30.0, `agy` 1.5.8 e Claude Code 2.1.325. A matriz de CI está configurada para Python 3.13 e 3.15 em Windows e Linux; confira o resultado do workflow antes de adotar outra combinação.
 - Aplicativo Claude Desktop (aba Code, sessão **Local**)
 - Claude Code CLI instalado e autenticado (`claude --version`, `claude -p "oi"`)
 - Antigravity App e CLI (`agy --version`), com autenticação realizada interativamente
-- O repositório deve estar limpo; execute tudo em projeto de teste
+- O repositório deve estar limpo; faça a primeira execução em um projeto de teste
 
 Instale o CLI do Antigravity seguindo a documentação oficial https://antigravity.google/docs/getting-started . A instalação Windows documentada é:
 
@@ -42,7 +42,7 @@ A instalação cria os comandos `contracanto` (CLI) e `contracanto-mcp` (servido
 Sem instalar, `python -m contracanto` e `python -m contracanto.server` equivalem a `contracanto` e `contracanto-mcp`, desde que o diretório desta cópia esteja no `PYTHONPATH`. Para desenvolver o próprio Contracanto, instale-o no venv dele com `python -m pip install -e ".[dev]"`.
 
 ## Teste sem MCP
-Copie `examples/plan.example.json`, edite com tasks reais e arquivos autorizados e use um repositório descartável. Exemplo, a partir da raiz do repositório:
+Copie `examples/plan.example.json`, edite com tasks reais e arquivos autorizados e faça o primeiro teste em um repositório descartável. Exemplo, a partir da raiz do repositório:
 
 ```powershell
 contracanto plano.json --parallel 3 --retries 2 --test py -m pytest
@@ -90,6 +90,7 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_GIT_TIMEOUT` | 180 | Segundos para cada comando Git |
 | `CONTRACANTO_REVIEW_MODEL` | `sonnet` | Modelo usado pelo revisor |
 | `CONTRACANTO_AGENT_RETRIES` | 1 | Novas chamadas ao `agy` quando uma implementação ou correção falha (0 a 3) |
+| `CONTRACANTO_AUTO_RESUME` | 1 | Vezes que `wait_for_run` relança sozinho uma execução cujo worker morreu (0 a 3; 0 desliga) |
 | `CONTRACANTO_REVIEW_PATCH_LIMIT` | 400000 | Tamanho máximo do patch enviado ao revisor, em caracteres |
 | `CONTRACANTO_TEST_COMMAND` | sem valor | Lista JSON de argumentos. Fixa o comando de testes: um comando diferente é recusado |
 | `CONTRACANTO_SETUP_COMMAND` | sem valor | Lista JSON de argumentos. Fixa o comando de preparação: um diferente é recusado e, sem nenhum informado, ele é usado; `[]` proíbe qualquer preparação |
@@ -189,13 +190,14 @@ Peça ao Claude na aba Code:
 - Antes do cherry-pick, o worker compara os caminhos da integração prevista com a lista `files` da tarefa. Se uma tarefa anterior moveu um diretório e o Git redirecionaria uma adição para fora do escopo, a integração é recusada. Depois do cherry-pick, o worker confere os caminhos do commit aplicado antes de executar os testes.
 - O aplicativo Claude não recebe notificação push de término. `wait_for_run` espera a execução terminar, por até 600 segundos por chamada, e devolve um resumo curto, com a branch de destino em `target`; `get_run_status` devolve o relatório completo, com pareceres, tempos e log. `worker_alive` indica se o worker ainda está rodando: com `false`, o estado não vai mais mudar e a reserva precisa ser liberada pelo operador.
 - Cada tarefa aprovada vira um commit na branch de destino, com o identificador e a descrição da tarefa no assunto e a execução de origem no corpo. A branch de destino é a que está em uso ou, com `--branch`, uma branch nova.
-- Uma execução interrompida não continua sozinha: depois de encerrada (e destravada, se preciso), `--resume` ou `resume_run` refaz as tarefas não aprovadas em uma execução nova. Não há limitação de custos/tokens, isolamento forte de execução ou fila transacional. Não use em repositórios reais até adicionar esses recursos.
+- Se o worker morrer sem registrar o estado final (processo encerrado, máquina reiniciada), `wait_for_run` libera a reserva e relança sozinho as tarefas que faltavam, com as mesmas opções, até `CONTRACANTO_AUTO_RESUME` vezes. Ele só faz isso com o repositório limpo, sem operação Git pendente e sem commit de tarefa não aprovada no histórico; caso contrário, `auto_resume.error` no resumo diz o motivo e a recuperação é manual. Pela CLI, `--resume` também libera sozinho a reserva de um worker morto. Uma execução que terminou pedindo recuperação manual nunca é retomada automaticamente.
+- Não há limitação de custos/tokens, isolamento forte de execução nem fila transacional. Os comandos de testes e de preparação rodam com as suas permissões: fixe-os com `CONTRACANTO_TEST_COMMAND` e `CONTRACANTO_SETUP_COMMAND` antes de usar em um repositório real.
 - Scripts usam revisão por modelo e não garantem correção ou segurança. Execute testes e auditoria adicionais antes de merge de produção.
 - Manter `agy` e `claude` no PATH do processo MCP e ter autenticação ativa é obrigatório.
 
 ## Estado e recuperação
 
-- Cada execução registra `status.json`, `plan.json` e, quando iniciada pelo MCP, `run.log` e `pid.txt` em `.agent-runs/runs/<run_id>/`. `get_run_status()` e `--status` devolvem esse estado como JSON, com horários de início e fim e o tempo gasto por tarefa em cada fase.
+- Cada execução registra `status.json`, `plan.json`, `options.json` (as opções com que foi iniciada, usadas na retomada automática) e, quando iniciada pelo MCP, `run.log` e `pid.txt` em `.agent-runs/runs/<run_id>/`. `get_run_status()` e `--status` devolvem esse estado como JSON, com horários de início e fim e o tempo gasto por tarefa em cada fase.
 - O worker registra cada evento da execução, com a hora: lotes, mudanças de estado das tarefas, início e fim de cada fase, vereditos, commits aplicados e erros. Pela CLI os eventos saem na saída de erro; pelo MCP ficam em `run.log`, cujo final aparece em `get_run_status()`.
 - Para encerrar a execução ativa, chame `stop_run()` ou execute `contracanto --stop`.
 - CLI e MCP compartilham a reserva `.agent-runs/run.lock`. Quando o estado do Git ou dos subprocessos fica incerto, `recovery_required: true` mantém a reserva até a inspeção manual; depois dela, `--unlock` libera a reserva.
@@ -227,7 +229,7 @@ Nenhum módulo guarda estado global: o repositório e o diretório de execuçõe
 
 `pyproject.toml` é a única declaração das dependências diretas (`mcp` e, no Windows, `pywin32`) e das ferramentas de desenvolvimento (`ruff` e `mypy`, no extra `dev`), além do pacote e de seus comandos. `requirements.lock.txt` fixa também as transitivas do ambiente validado; use-o na instalação e na CI. Para desenvolver, instale o lock e depois `python -m pip install -e ".[dev]"`. A CI confere com `scripts/check_lock.py` que o lock fixa as mesmas versões declaradas em `pyproject.toml` e executa `ruff check .`, `ruff format --check .` e `mypy` além dos testes, pelo executor paralelo. O `mypy` confere o pacote, `scripts/` e `tests/`. A versão do pacote fica em `contracanto/__init__.py`. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
 
-A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Continuação automática após crash e orçamento de tokens/custo continuam fora do escopo deste protótipo; a reserva e a recuperação manual continuam obrigatórias nesses casos.
+A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Orçamento de tokens/custo continua fora do escopo. A retomada automática cobre o worker que morre com o repositório íntegro; quando o Git ou os subprocessos ficam em estado incerto, a reserva e a recuperação manual continuam obrigatórias.
 
 ## Licença
 

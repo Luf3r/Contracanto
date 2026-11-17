@@ -132,6 +132,9 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace, ws: sta
         setup = parse_command(args.setup_json, '--setup-json') if args.setup_json else None
         config.check_pinned(args.test, setup)
         if args.resume is not None:
+            released = maintenance.release_dead_reservation(ws)
+            if released:
+                print(released, file=sys.stderr)
             plan = maintenance.resume_plan(ws, args.resume or None, args.force)
         else:
             # Um worker lançado pelo MCP só lê o plano depois de assumir a reserva.

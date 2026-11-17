@@ -13,7 +13,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from . import config, maintenance, process, state
+from . import config, gitops, maintenance, process, state
 from .plan import parse_command, validate
 from .runner import check_repository
 
@@ -132,6 +132,8 @@ def _launch(
     test: list[str],
     setup: list[str] | None,
     branch: str,
+    auto_resumes: int = 0,
+    resumed_from: str | None = None,
 ) -> str:
     """Reserva a execução e lança o worker destacado para um plano já validado."""
     ws = WORKSPACE
@@ -147,6 +149,19 @@ def _launch(
         # A partir daqui as consultas mostram esta execução, não a anterior.
         ws.publish_run(run_id)
         state.write_json(ws.plan(run_id), plan)
+        state.write_json(
+            ws.options(run_id),
+            {
+                'parallel': parallel,
+                'retries': retries,
+                'keep_worktrees': keep_worktrees,
+                'test': test,
+                'setup': setup,
+                'branch': branch.strip() or None,
+                'auto_resumes': auto_resumes,
+                'resumed_from': resumed_from,
+            },
+        )
         argv = worker_argv(ws, run_id, token, parallel, retries, keep_worktrees, test, setup, branch.strip() or None)
         run.save()
         with ws.log(run_id).open('w', encoding='utf-8') as log:
@@ -199,10 +214,13 @@ def resume_run(
     run_id: execução de origem; vazio usa a mais recente. As tarefas aprovadas nela saem do
     plano e deixam de ser exigidas como dependência, por isso os commits delas precisam estar
     no HEAD atual do repositório. Os demais parâmetros e avisos são os de submit_plan.
+    Se a reserva pertence a um worker que morreu no meio da execução, ela é liberada antes,
+    com as mesmas conferências de --unlock.
     Retorna um texto iniciado por "Erro:" quando não há o que retomar.
     """
     try:
         test, setup = _parse_options(parallel, retries, test_command_json, setup_command_json)
+        maintenance.release_dead_reservation(WORKSPACE)
         plan = maintenance.resume_plan(WORKSPACE, run_id.strip() or None)
     except (ValueError, RuntimeError) as error:
         return f'Erro: {error}'
@@ -221,12 +239,53 @@ def get_run_status() -> str:
     run: status persistido (state, run_id, started_at, finished_at, duration_seconds, statuses,
     details, timings por tarefa e fase, recovery_required, error) ou null.
     reservation_state: "active", "none" ou "incomplete"; reservation traz run_id, pid, stop_requested
-    e worker_alive. Com worker_alive false a execução não vai mais avançar: pare de consultar e
-    avise o operador, que inspeciona o repositório e libera a reserva com --unlock.
+    e worker_alive. Com worker_alive false a execução não vai mais avançar sozinha: chame
+    wait_for_run, que tenta a retomada automática, e avise o operador se ela não for possível.
     Para apenas esperar o término, prefira wait_for_run, que devolve um resumo curto.
     log: últimas linhas do log do worker lançado pelo MCP.
     """
     return json.dumps(maintenance.status_report(WORKSPACE), ensure_ascii=False, indent=2)
+
+
+def _auto_resume(report: dict[str, Any]) -> dict[str, Any]:
+    """Relança, com as tarefas que faltam, a execução cujo worker morreu.
+
+    Devolve `resumed_from` e `attempt` quando relançou, ou `error` com o motivo
+    de não ter relançado. Nada é forçado: valem as conferências de --unlock e
+    de --resume, e o limite CONTRACANTO_AUTO_RESUME por cadeia de retomadas.
+    """
+    ws = WORKSPACE
+    run_id = (report['reservation'] or {}).get('run_id')
+    options = maintenance.read_options(ws, run_id) if run_id else None
+    if run_id is None or options is None:
+        return {'error': 'A execução não registrou as opções necessárias para ser retomada'}
+    attempts = int(options.get('auto_resumes') or 0)
+    if attempts >= config.AUTO_RESUME:
+        return {'error': f'Limite de retomadas automáticas atingido ({config.AUTO_RESUME})', 'from': run_id}
+    try:
+        maintenance.release_dead_reservation(ws)
+        plan = maintenance.resume_plan(ws, run_id)
+        config.check_pinned(options['test'], options.get('setup'))
+        branch = options.get('branch') or ''
+        if branch and gitops.branch_ref(ws.root) == f'refs/heads/{branch}':
+            # O worker anterior já criou a branch de integração e deixou o checkout nela.
+            branch = ''
+    except (RuntimeError, ValueError) as error:
+        return {'error': str(error), 'from': run_id}
+    message = _launch(
+        plan,
+        options['parallel'],
+        options['retries'],
+        bool(options.get('keep_worktrees')),
+        options['test'],
+        options.get('setup'),
+        branch,
+        auto_resumes=attempts + 1,
+        resumed_from=run_id,
+    )
+    if message.startswith('Erro:'):
+        return {'error': message.removeprefix('Erro: '), 'from': run_id}
+    return {'resumed_from': run_id, 'attempt': attempts + 1}
 
 
 @mcp.tool()
@@ -240,15 +299,28 @@ async def wait_for_run(timeout_seconds: int = 120) -> str:
     task_errors, recovery_required, error,
     duration_seconds, reservation_state, worker_alive e stop_requested. Para pareceres, tempos
     por fase e log, use get_run_status.
+    Se o worker morreu sem registrar o estado final, a ferramenta libera a reserva e relança
+    sozinha as tarefas que faltavam, desde que o repositório esteja limpo e sem operação Git
+    pendente; a espera segue na execução nova e auto_resume traz resumed_from e attempt. Quando
+    não é possível relançar, auto_resume.error diz o motivo e o operador precisa intervir.
     """
     deadline = time.monotonic() + max(1, min(timeout_seconds, WAIT_LIMIT))
+    resumed: dict[str, Any] = {}
     while True:
         report = maintenance.status_report(WORKSPACE)
+        if not resumed and maintenance.crashed(report):
+            resumed = _auto_resume(report)
+            if 'error' not in resumed:
+                # A espera continua na execução nova.
+                continue
         done = maintenance.settled(report)
         if done or time.monotonic() >= deadline:
             break
         await asyncio.sleep(WAIT_POLL_INTERVAL)
-    return json.dumps({**maintenance.summarize(report), 'timed_out': not done}, ensure_ascii=False, indent=2)
+    summary = {**maintenance.summarize(report), 'timed_out': not done}
+    if resumed:
+        summary['auto_resume'] = resumed
+    return json.dumps(summary, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()

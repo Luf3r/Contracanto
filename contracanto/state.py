@@ -66,6 +66,10 @@ class Workspace:
     def plan(self, run_id: str) -> Path:
         return self.run_dir(run_id) / 'plan.json'
 
+    def options(self, run_id: str) -> Path:
+        """Parâmetros com que a execução foi iniciada, para poder repeti-la."""
+        return self.run_dir(run_id) / 'options.json'
+
     def log(self, run_id: str) -> Path:
         return self.run_dir(run_id) / 'run.log'
 

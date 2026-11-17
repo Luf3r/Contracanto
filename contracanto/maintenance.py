@@ -204,6 +204,47 @@ def unlock(ws: Workspace) -> str:
     return f'Reserva {run_id or "sem identificador"} removida. Uma nova execução pode ser iniciada.'
 
 
+def read_options(ws: Workspace, run_id: str) -> dict[str, Any] | None:
+    """Opções com que a execução foi iniciada, ou None se não foram registradas."""
+    try:
+        options = _read_json(ws.options(run_id))
+    except ValueError:
+        return None
+    return options if isinstance(options, dict) and options.get('test') else None
+
+
+def crashed(report: dict[str, Any]) -> bool:
+    """Se o worker da execução reservada morreu sem registrar um estado final."""
+    reservation = report['reservation'] or {}
+    run = report['run'] or {}
+    return (
+        report['reservation_state'] == 'active'
+        and reservation.get('worker_alive') is False
+        and run.get('state') not in state.TERMINAL_STATES
+    )
+
+
+def release_dead_reservation(ws: Workspace) -> str | None:
+    """Libera a reserva de um worker que morreu no meio da execução, com as conferências do --unlock.
+
+    Devolve a mensagem da liberação, ou None quando não há reserva. Uma execução
+    que terminou pedindo recuperação manual nunca é liberada por aqui.
+    """
+    report = status_report(ws)
+    if report['reservation_state'] == 'none':
+        return None
+    if not crashed(report):
+        if (report['reservation'] or {}).get('worker_alive'):
+            raise RuntimeError('Há uma execução em andamento; aguarde o término ou use --stop')
+        raise RuntimeError(
+            'A execução reservada exige recuperação manual; inspecione o repositório e libere a reserva com --unlock'
+        )
+    message = unlock(ws)
+    if message.startswith('Recusado'):
+        raise RuntimeError(f'A reserva do worker encerrado não pôde ser liberada. {message}')
+    return message
+
+
 def resume_plan(ws: Workspace, run_id: str | None = None, force: bool = False) -> plan.Plan:
     """Plano com as tarefas que não foram aprovadas em uma execução encerrada.
 

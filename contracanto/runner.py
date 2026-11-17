@@ -107,6 +107,20 @@ def execute(
     # Diagnóstico para --unlock; a execução não depende dele.
     with contextlib.suppress(OSError):
         ws.worker_pid(run_id).write_text(str(os.getpid()), encoding='utf-8')
+    if not ws.options(run_id).exists():
+        # Pela CLI ninguém registrou ainda com que opções repetir a execução.
+        with contextlib.suppress(OSError):
+            state.write_json(
+                ws.options(run_id),
+                {
+                    'parallel': max_workers,
+                    'retries': retries,
+                    'keep_worktrees': keep_worktrees,
+                    'test': list(tests or []),
+                    'setup': list(setup) if setup else None,
+                    'branch': branch,
+                },
+            )
     ctx = RunContext.open(ws, run_id, keep_worktrees, setup, branch)
     run = ctx.state
     keep_lock = False

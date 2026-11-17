@@ -15,7 +15,7 @@ O relatório completo é um objeto JSON com quatro campos:
 - `reservation`: `run_id`, `pid`, `stop_requested` e `worker_alive` da reserva ativa, ou `null`.
 - `log`: as últimas linhas do log do worker lançado pelo MCP, com os eventos da execução (lotes, estados das tarefas, fases, vereditos, commits aplicados e erros).
 
-`worker_alive` é `false` quando o processo que deveria estar trabalhando na execução não existe mais: o worker que a assumiu ou, antes disso, o worker lançado pelo MCP ou o processo que criou a reserva. Nesse caso o estado gravado não muda mais, mesmo que diga `running`; siga [Após um encerramento abrupto](#após-um-encerramento-abrupto).
+`worker_alive` é `false` quando o processo que deveria estar trabalhando na execução não existe mais: o worker que a assumiu ou, antes disso, o worker lançado pelo MCP ou o processo que criou a reserva. Nesse caso o estado gravado não muda mais, mesmo que diga `running`. `wait_for_run` tenta então a retomada automática, descrita abaixo; se ela não for possível, siga [Após um encerramento abrupto](#após-um-encerramento-abrupto).
 
 O resumo de `wait_for_run` traz `run_id`, `state`, `statuses`, `target`, `task_errors` (o começo do erro de cada tarefa que falhou), `recovery_required`, `error`, `duration_seconds`, `reservation_state`, `worker_alive`, `stop_requested` e `timed_out`. A ferramenta retorna assim que a execução chega a um estado final, o worker morre ou não há execução reservada. Se o tempo pedido (1 a 600 segundos) acabar antes, `timed_out` vem `true` e basta chamar de novo. Pareceres, tempos por fase e log ficam só no relatório completo.
 
@@ -85,6 +85,7 @@ Tudo fica em `.agent-runs/runs/<run_id>/`:
 | --- | --- |
 | `status.json` | Estado da execução, substituído de forma atômica a cada atualização |
 | `plan.json` | Plano recebido, gravado sob a reserva antes da preparação |
+| `options.json` | Opções da execução (paralelismo, tentativas, comandos, branch), para repeti-la em uma retomada |
 | `run.log` | Eventos e saída do worker (só em execuções iniciadas pelo MCP) |
 | `pid.txt` | PID do worker lançado pelo MCP |
 | `claim/pid` | PID do worker que assumiu a execução, pela CLI ou pelo MCP |
@@ -134,11 +135,27 @@ A reserva é mantida, sem revert automático, quando:
 
 Nesses casos nenhuma outra tarefa integra. Consulte o erro e `git status` antes de continuar.
 
+## Retomada automática
+
+Quando o worker morre sem registrar um estado final, `wait_for_run` faz sozinho o que o procedimento manual abaixo descreve, se for seguro:
+
+1. confere que o worker e os comandos que ele iniciou não estão mais rodando, que não há operação Git pendente e que o repositório está limpo (as conferências de `--unlock`);
+2. libera a reserva e marca a execução interrompida como `failed`;
+3. confere que os commits das tarefas aprovadas estão no HEAD e que nenhuma tarefa não aprovada deixou commit na branch (as conferências de `--resume`);
+4. lança uma execução nova com as tarefas que faltavam e as opções gravadas em `options.json`, e continua esperando por ela.
+
+O resumo traz então `auto_resume.resumed_from` e `auto_resume.attempt`. Se alguma conferência falhar, nada é forçado: `auto_resume.error` diz o motivo e vale o procedimento manual. `CONTRACANTO_AUTO_RESUME` limita quantas vezes uma mesma execução pode ser relançada em sequência (padrão 1; 0 desliga). A retomada acontece quando alguém chama `wait_for_run`; não há processo vigiando em segundo plano. Uma execução encerrada com `recovery_required: true` nunca é retomada automaticamente.
+
+Pela CLI, `contracanto --resume --test ...` faz os passos 1 a 3 e executa as tarefas que faltavam.
+
 ## Após um encerramento abrupto
+
+Use este procedimento quando a retomada automática não foi possível ou a execução pediu recuperação manual.
+
 
 1. **Veja o que aconteceu.** Leia `run.log`, `status.json` e `pid.txt` em `.agent-runs/runs/<run_id>/`; o `run_id` está em `.agent-runs/run.lock`. Se a submissão avisou que não conseguiu gravar `pid.txt`, use o PID informado na resposta do MCP. A reserva também registra o PID do processo que a criou, que no MCP é o servidor.
 2. **Confirme que nada mais está rodando.** No Gerenciador de Tarefas (ou com `ps`), confira que o worker e seus subprocessos terminaram.
-3. **Inspecione o Git.** Use `git status`, `git log -5 --oneline` e `git worktree list`. Preserve alterações e resolva operações Git pendentes antes de começar outra execução. Nada é retomado sozinho.
+3. **Inspecione o Git.** Use `git status`, `git log -5 --oneline` e `git worktree list`. Preserve alterações e resolva operações Git pendentes antes de começar outra execução.
 4. **Libere a reserva** com `contracanto --unlock`.
 5. **Corrija a causa**, confira a branch e o Git limpo e então submeta um plano novo ou refaça só o que faltou com `contracanto --resume --test ...` (ou `resume_run` pelo MCP).
 

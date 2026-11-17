@@ -92,6 +92,9 @@ REVIEW_MODEL = _text('REVIEW_MODEL', 'sonnet')
 # Novas chamadas ao agy quando uma implementação ou correção falha sem deixar o worktree
 # em estado incerto.
 AGENT_RETRIES = _count('AGENT_RETRIES', 1, range(4))
+# Vezes que wait_for_run relança sozinho, com as tarefas que faltam, uma execução cujo
+# worker morreu sem registrar o estado final; 0 desliga.
+AUTO_RESUME = _count('AUTO_RESUME', 1, range(4))
 # Caracteres do patch aceitos em um pedido de revisão; acima disso a tarefa falha em vez de
 # ser revisada pela metade.
 REVIEW_PATCH_LIMIT = _count('REVIEW_PATCH_LIMIT', 400_000, range(1, 10_000_001))
@@ -114,6 +117,7 @@ TUNABLE = (
     'REVIEW_TIMEOUT',
     'REVIEW_MODEL',
     'AGENT_RETRIES',
+    'AUTO_RESUME',
     'REVIEW_PATCH_LIMIT',
     'TEST_COMMAND',
     'SETUP_COMMAND',
