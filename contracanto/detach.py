@@ -30,6 +30,8 @@ BREAKAWAY = getattr(subprocess, 'CREATE_BREAKAWAY_FROM_JOB', 0)
 
 def in_job(process: subprocess.Popen) -> bool:
     """Se o processo pertence a algum Job Object; na dúvida, responde que sim."""
+    if sys.platform != 'win32':
+        return False
     import ctypes
     from ctypes import wintypes
 
@@ -37,7 +39,7 @@ def in_job(process: subprocess.Popen) -> bool:
     kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
     kernel.IsProcessInJob.restype = wintypes.BOOL
     result = wintypes.BOOL()
-    handle = wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
+    handle = wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined, unused-ignore]
     if not kernel.IsProcessInJob(handle, None, ctypes.byref(result)):
         return True
     return bool(result.value)

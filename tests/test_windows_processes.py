@@ -200,6 +200,8 @@ class DetachedWorkerJobTests(unittest.TestCase):
         Devolve o PID, o `outside_job` informado e se o worker ficou neste job. O ambiente que
         roda os testes pode ter um job externo próprio, por isso a conferência é por este job.
         """
+        if sys.platform != 'win32':  # Para o mypy fora do Windows; a classe já é pulada lá.
+            raise unittest.SkipTest('Windows Job Objects')
         from contracanto import windows_job as w
 
         code = self.parent_code(stay=False, wmi=wmi)
@@ -271,6 +273,8 @@ class DetachedWorkerJobTests(unittest.TestCase):
     def test_worker_survives_a_tree_kill_of_its_launcher(self):
         # O app do Claude, ao fechar ou reiniciar, pode encerrar a árvore de processos inteira;
         # mesmo sem a WMI, o intermediário tira o worker dela.
+        if sys.platform != 'win32':  # Para o mypy fora do Windows; a classe já é pulada lá.
+            raise unittest.SkipTest('Windows Job Objects')
         parent = subprocess.Popen(
             [BASE_PYTHON, '-I', '-c', self.parent_code(stay=True, wmi=False)],
             stdout=subprocess.PIPE,

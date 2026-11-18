@@ -410,7 +410,12 @@ class WatchCommandTests(unittest.TestCase):
         with support.temp_dir() as directory:
             ws = st.Workspace.for_root(directory)
             result = subprocess.run(
-                server.watch_command(ws), capture_output=True, text=True, timeout=60, env=server.worker_env()
+                server.watch_command(ws),
+                capture_output=True,
+                # O worker_env força UTF-8 na saída; sem isso, o Python 3.13 no Windows lê em cp1252.
+                encoding='utf-8',
+                timeout=60,
+                env=server.worker_env(),
             )
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('Nenhuma execução registrada', result.stdout)
