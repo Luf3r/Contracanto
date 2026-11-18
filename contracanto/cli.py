@@ -9,7 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, config, maintenance, runner, state
+from . import __version__, config, maintenance, runner, state, watch
 from .errors import RunCancelled, describe
 from .plan import parse_command
 
@@ -32,6 +32,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     action.add_argument('--stop', action='store_true', help='Solicita o encerramento da execução ativa')
     action.add_argument('--status', action='store_true', help='Mostra o estado da execução ativa ou da mais recente')
+    action.add_argument(
+        '--watch',
+        action='store_true',
+        help='Acompanha a execução ativa num painel até ela terminar. Fora de um terminal, escreve uma linha por '
+        'mudança e o resumo final. Sai com 0 se todas as tarefas foram aprovadas, 1 se não, 3 se o worker morreu.',
+    )
     action.add_argument(
         '--unlock',
         action='store_true',
@@ -114,6 +120,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace, ws: sta
     if args.status:
         print(json.dumps(maintenance.status_report(ws), ensure_ascii=False, indent=2))
         return
+    if args.watch:
+        sys.exit(watch.watch(ws))
     if args.unlock:
         message = maintenance.unlock(ws)
         print(message)
