@@ -1,6 +1,7 @@
 """Windows process cleanup must not depend on taskkill's racy exit status."""
 
 import concurrent.futures
+import io
 import os
 import site
 import subprocess
@@ -171,17 +172,21 @@ class WindowsProcessTests(unittest.TestCase):
 
 # Roda no interpretador base, sem o lançador do venv, que cria um job próprio e confundiria
 # o teste; os pacotes do venv entram por addsitedir, que também processa os .pth do pywin32.
+BASE_PYTHON = getattr(sys, '_base_executable', sys.executable)
 DETACHED_PARENT = r"""
-import site, subprocess, sys
+import os, site, sys, time
 for directory in {sites!r}:
     site.addsitedir(directory)
 sys.path.insert(0, {root!r})
 from contracanto import process
-child, outside = process.launch_detached(
-    [sys.executable, '-c', 'import time; time.sleep(60)'],
-    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+pid, outside = process.launch_detached(
+    [sys.executable, '-c', 'import time; time.sleep(60)'], log=os.devnull, cwd='.', env=dict(os.environ),
+    use_wmi={wmi!r},
 )
-print(child.pid, outside, flush=True)
+print(pid, outside, flush=True)
+# Com STAY, o lançador continua vivo, como o servidor MCP enquanto o app está aberto.
+if {stay!r}:
+    time.sleep(60)
 """
 
 
@@ -189,12 +194,15 @@ print(child.pid, outside, flush=True)
 class DetachedWorkerJobTests(unittest.TestCase):
     """O worker do MCP precisa sobreviver ao job que o cliente aplica ao servidor."""
 
-    def launch_from_job(self, allow_breakaway):
-        """Lança um worker de dentro de um job que encerra tudo ao fechar; devolve PID e saída do job."""
+    def launch_from_job(self, allow_breakaway, wmi):
+        """Lança um worker de dentro de um job que encerra tudo ao fechar.
+
+        Devolve o PID, o `outside_job` informado e se o worker ficou neste job. O ambiente que
+        roda os testes pode ter um job externo próprio, por isso a conferência é por este job.
+        """
         from contracanto import windows_job as w
 
-        root = str(Path(__file__).resolve().parent.parent)
-        code = DETACHED_PARENT.format(root=root, sites=site.getsitepackages())
+        code = self.parent_code(stay=False, wmi=wmi)
         with w.WindowsJob() as job:
             if allow_breakaway:
                 kind = w.win32job.JobObjectExtendedLimitInformation
@@ -202,7 +210,7 @@ class DetachedWorkerJobTests(unittest.TestCase):
                 limits['BasicLimitInformation']['LimitFlags'] |= w.win32job.JOB_OBJECT_LIMIT_BREAKAWAY_OK
                 w.win32job.SetInformationJobObject(job.handle, kind, limits)
             parent = subprocess.Popen(
-                [getattr(sys, '_base_executable', sys.executable), '-I', '-c', code],
+                [BASE_PYTHON, '-I', '-c', code],
                 stdout=subprocess.PIPE,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW | w.WindowsJob.creationflags,
@@ -210,9 +218,18 @@ class DetachedWorkerJobTests(unittest.TestCase):
             job.start(parent.pid)
             output, _ = parent.communicate(timeout=60)
             self.assertEqual(parent.returncode, 0, output)
-        pid, outside = output.split()
-        self.addCleanup(self.kill, int(pid))
-        return int(pid), outside == 'True'
+            pid, outside = output.split()
+            self.addCleanup(self.kill, int(pid))
+            worker = w.win32api.OpenProcess(w.win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            try:
+                in_test_job = w.win32job.IsProcessInJob(worker, job.handle)
+            finally:
+                worker.Close()
+        return int(pid), outside == 'True', in_test_job
+
+    def parent_code(self, stay, wmi):
+        root = str(Path(__file__).resolve().parent.parent)
+        return DETACHED_PARENT.format(root=root, sites=site.getsitepackages(), stay=stay, wmi=wmi)
 
     def kill(self, pid):
         import pywintypes
@@ -239,13 +256,81 @@ class DetachedWorkerJobTests(unittest.TestCase):
             time.sleep(0.1)
         return True
 
-    def test_worker_leaves_a_job_that_allows_it(self):
-        pid, outside = self.launch_from_job(allow_breakaway=True)
-        if not outside:
-            self.skipTest('o ambiente que roda os testes está num job que não permite a saída')
+    def test_wmi_takes_the_worker_out_of_a_job_that_forbids_leaving(self):
+        # O caso do app do Claude: o job do servidor MCP não permite CREATE_BREAKAWAY_FROM_JOB.
+        pid, outside, in_test_job = self.launch_from_job(allow_breakaway=False, wmi=True)
+        self.assertFalse(in_test_job)
+        self.assertTrue(outside)
         self.assertTrue(self.alive_after_job_closes(pid))
 
-    def test_job_that_forbids_leaving_still_gets_a_worker_and_a_warning(self):
-        pid, outside = self.launch_from_job(allow_breakaway=False)
+    def test_without_wmi_the_worker_leaves_a_job_that_allows_it(self):
+        pid, _, in_test_job = self.launch_from_job(allow_breakaway=True, wmi=False)
+        self.assertFalse(in_test_job)
+        self.assertTrue(self.alive_after_job_closes(pid))
+
+    def test_worker_survives_a_tree_kill_of_its_launcher(self):
+        # O app do Claude, ao fechar ou reiniciar, pode encerrar a árvore de processos inteira;
+        # mesmo sem a WMI, o intermediário tira o worker dela.
+        parent = subprocess.Popen(
+            [BASE_PYTHON, '-I', '-c', self.parent_code(stay=True, wmi=False)],
+            stdout=subprocess.PIPE,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        self.addCleanup(parent.kill)
+        pid, _ = (parent.stdout or io.StringIO()).readline().split()
+        self.addCleanup(self.kill, int(pid))
+        self.assertIsNone(parent.poll())
+        subprocess.run(['taskkill', '/T', '/F', '/PID', str(parent.pid)], capture_output=True, timeout=30)
+        parent.wait(timeout=30)
+        self.assertTrue(self.alive_after_job_closes(int(pid)))
+
+    def test_without_wmi_a_job_that_forbids_leaving_keeps_the_worker_and_warns(self):
+        pid, outside, in_test_job = self.launch_from_job(allow_breakaway=False, wmi=False)
+        self.assertTrue(in_test_job)
         self.assertFalse(outside)
         self.assertFalse(self.alive_after_job_closes(pid))
+
+
+@unittest.skipUnless(os.name == 'nt', 'Windows Job Objects')
+class DetachedLaunchTests(unittest.TestCase):
+    def wait_for_text(self, path, text):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            content = path.read_text(encoding='utf-8', errors='replace')
+            if text in content:
+                return content
+            time.sleep(0.1)
+        self.fail(f'{text!r} não apareceu em {path}: {path.read_text(errors="replace")!r}')
+
+    def test_worker_gets_the_environment_directory_and_log_through_wmi(self):
+        with support.temp_dir() as directory:
+            log = directory / 'run.log'
+            log.write_text('', encoding='utf-8')
+            code = 'import os; print("ambiente", os.environ["CONTRACANTO_PROBE"], os.getcwd(), flush=True)'
+            env = dict(os.environ, CONTRACANTO_PROBE='ação ok')
+            pid, outside = proc.launch_detached([sys.executable, '-c', code], log=log, cwd=directory, env=env)
+            content = self.wait_for_text(log, 'ambiente')
+        self.assertTrue(outside)
+        self.assertNotIn('WMI indisponível', content)
+        self.assertIn('ação ok', content)
+        self.assertIn(str(directory), content)
+
+    def test_wmi_failure_falls_back_to_a_direct_launch_and_says_why(self):
+        with support.temp_dir() as directory:
+            log = directory / 'run.log'
+            log.write_text('', encoding='utf-8')
+            with patch.object(proc, '_create_with_wmi', side_effect=OSError('negado por política')):
+                proc.launch_detached(
+                    [sys.executable, '-c', 'print("fallback ok")'], log=log, cwd=directory, env=os.environ
+                )
+            content = self.wait_for_text(log, 'fallback ok')
+        self.assertIn('WMI indisponível', content)
+        self.assertIn('negado por política', content)
+
+    def test_worker_that_cannot_start_is_an_error(self):
+        with support.temp_dir() as directory:
+            log = directory / 'run.log'
+            log.write_text('', encoding='utf-8')
+            with self.assertRaisesRegex(RuntimeError, 'não lançou o worker'):
+                proc.launch_detached([str(directory / 'inexistente.exe')], log=log, cwd=directory, env=os.environ)

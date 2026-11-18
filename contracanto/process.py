@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -152,40 +153,110 @@ else:
         return True
 
 
-def launch_detached(argv: Sequence[str], popen: Any = None, **options: Any) -> tuple[subprocess.Popen, bool]:
-    """Lança um worker que sobrevive ao processo que o lançou.
+DETACH_TIMEOUT = 60
+DETACH_POLL_INTERVAL = 0.05
 
-    Devolve o processo e se ele ficou fora do Job Object do lançador. No Windows, o cliente
-    MCP costuma pôr o servidor num job que encerra os descendentes quando o servidor é
-    substituído; o worker pede para sair dele com CREATE_BREAKAWAY_FROM_JOB. Um job que não
-    permite a saída recusa a criação com acesso negado, e então o worker é lançado dentro
-    dele, como antes, com o retorno False para que quem lançou possa avisar. `popen` substitui
-    subprocess.Popen, para quem lança simular o worker.
+
+def launch_detached(
+    argv: Sequence[str], log: str | Path, cwd: str | Path, env: Mapping[str, str], use_wmi: bool = True
+) -> tuple[int, bool]:
+    """Lança um worker que sobrevive ao processo que o lançou e ao app que lançou esse processo.
+
+    Devolve o PID do worker e se ele ficou fora de qualquer Job Object. A saída e os erros do
+    worker vão para o arquivo `log`. No Windows, o worker é lançado por um intermediário (veja
+    detach) que a WMI cria fora do job e da árvore de processos do app do Claude; sem a WMI, o
+    intermediário é criado aqui, o que ainda tira o worker da árvore. O pedido ao intermediário
+    passa por um arquivo temporário do usuário, com o ambiente do worker, removido em seguida.
+    Nos demais sistemas, uma sessão própria já separa o worker do grupo de quem lançou.
     """
-    popen = popen or subprocess.Popen
-    flags = detached_options()
     if sys.platform != 'win32':
-        return popen(argv, **flags, **options), True
-    breakaway = flags['creationflags'] | subprocess.CREATE_BREAKAWAY_FROM_JOB
+        with open(log, 'a', encoding='utf-8') as output:
+            worker = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                cwd=cwd,
+                env=env,
+                **detached_options(),
+            )
+        return worker.pid, True
+    from . import detach
+
+    with tempfile.TemporaryDirectory(prefix='contracanto-launch-', ignore_cleanup_errors=True) as scratch:
+        spec, result = Path(scratch) / 'spec.json', Path(scratch) / 'result.json'
+        data = {'argv': list(argv), 'env': dict(env), 'cwd': str(cwd), 'log': str(log), 'result': str(result)}
+        spec.write_text(json.dumps(data), encoding='utf-8')
+        # pythonw não tem console: nem o intermediário nem o worker abrem uma janela.
+        windowless = Path(sys.executable).with_name('pythonw.exe')
+        python = str(windowless) if windowless.is_file() else sys.executable
+        command = [python, '-I', detach.__file__, '--spec', str(spec)]
+        intermediate = None
+        if use_wmi:
+            try:
+                intermediate = _create_with_wmi(command, cwd)
+            except Exception as error:  # A WMI pode estar desativada ou negada por política.
+                log_line = f'WMI indisponível para lançar o worker ({describe(error)}); lançando diretamente\n'
+                with contextlib.suppress(OSError), open(log, 'a', encoding='utf-8') as output:
+                    output.write(log_line)
+        if intermediate is None:
+            process, _ = detach.spawn(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=cwd,
+                env=env,
+            )
+            intermediate = process.pid
+        return _detach_result(result, intermediate)
+
+
+def _wmi_process_create(command_line: str, cwd: str) -> int:
+    import win32com.client
+
+    service = win32com.client.GetObject('winmgmts:{impersonationLevel=impersonate}!//./root/cimv2')
+    startup = service.Get('Win32_ProcessStartup').SpawnInstance_()
+    startup.ShowWindow = 0  # SW_HIDE
+    process_class = service.Get('Win32_Process')
+    inputs = process_class.Methods_('Create').InParameters.SpawnInstance_()
+    inputs.CommandLine = command_line
+    inputs.CurrentDirectory = cwd
+    inputs.ProcessStartupInformation = startup
+    outputs = process_class.ExecMethod_('Create', inputs)
+    if outputs.ReturnValue != 0:
+        raise OSError(f'Win32_Process.Create devolveu {outputs.ReturnValue}')
+    return int(outputs.ProcessId)
+
+
+def _create_with_wmi(command: Sequence[str], cwd: str | Path) -> int:
+    """Cria o processo pela WMI (Win32_Process.Create) e devolve o PID.
+
+    O processo nasce do provedor da WMI, fora do Job Object e da árvore de quem chama.
+    """
+    import pythoncom
+
+    pythoncom.CoInitialize()
     try:
-        return popen(argv, creationflags=breakaway, **options), True
-    except PermissionError:
-        process = popen(argv, **flags, **options)
-        return process, not _in_job(process)
+        # Os objetos COM vivem só dentro da chamada e são liberados antes do CoUninitialize.
+        return _wmi_process_create(subprocess.list2cmdline(command), str(cwd))
+    finally:
+        pythoncom.CoUninitialize()
 
 
-def _in_job(process: subprocess.Popen) -> bool:
-    """Se o processo pertence a algum Job Object; na dúvida, responde que sim."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
-    result = wintypes.BOOL()
-    handle = wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
-    if not kernel.IsProcessInJob(handle, None, ctypes.byref(result)):
-        return True
-    return bool(result.value)
+def _detach_result(result: Path, intermediate: int) -> tuple[int, bool]:
+    """Espera o intermediário informar o worker que lançou."""
+    deadline = time.monotonic() + DETACH_TIMEOUT
+    while not result.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError('O intermediário que lança o worker não respondeu a tempo')
+        if not pid_alive(intermediate) and not result.exists():
+            raise RuntimeError('O intermediário que lança o worker terminou sem lançá-lo')
+        time.sleep(DETACH_POLL_INTERVAL)
+    report = json.loads(result.read_text(encoding='utf-8'))
+    if 'error' in report:
+        raise RuntimeError(f'O intermediário não lançou o worker: {report["error"]}')
+    return int(report['pid']), bool(report['outside_job'])
 
 
 def _register(stop: StopSignal | None, pid: int) -> Path | None:

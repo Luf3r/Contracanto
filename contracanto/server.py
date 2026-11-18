@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -187,16 +186,9 @@ def _launch(
         )
         argv = worker_argv(ws, run_id, token, parallel, retries, keep_worktrees, test, setup, branch.strip() or None)
         run.save()
-        with ws.log(run_id).open('w', encoding='utf-8') as log:
-            proc, outside_job = process.launch_detached(
-                argv,
-                subprocess.Popen,
-                cwd=str(ws.root),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                env=worker_env(),
-            )
+        # O log começa vazio; o worker, lançado por outro processo, acrescenta a ele.
+        ws.log(run_id).write_text('', encoding='utf-8')
+        pid, outside_job = process.launch_detached(argv, log=ws.log(run_id), cwd=str(ws.root), env=worker_env())
     except Exception as error:
         try:
             run.finish('failed')
@@ -207,7 +199,7 @@ def _launch(
             state.release_run(ws, token)
         raise
     message = (
-        f'Execução {run_id} iniciada com PID {proc.pid}. Acompanhe com wait_for_run ou get_run_status. '
+        f'Execução {run_id} iniciada com PID {pid}. Acompanhe com wait_for_run ou get_run_status. '
         'O início não representa aprovação das tarefas.'
         '\nPara ser avisado do fim sem consultar, rode em segundo plano (no Claude Code, Bash com '
         f'run_in_background): {watch_command_line(ws)}\n'
@@ -217,17 +209,17 @@ def _launch(
     )
     if not outside_job:
         message += (
-            '\nAviso: o cliente MCP não permite que o worker saia do Job Object do servidor. '
-            'Se o servidor MCP for encerrado ou substituído, o worker e os agentes morrem junto; '
-            'wait_for_run relança as tarefas que faltarem.'
+            '\nAviso: o worker ficou dentro de um Job Object, provavelmente o do app do Claude, porque a '
+            'WMI não pôde criá-lo fora dele (veja run.log). Se o app ou o servidor MCP forem encerrados, '
+            'o worker e os agentes podem morrer junto; wait_for_run relança as tarefas que faltarem.'
         )
     try:
-        ws.pid(run_id).write_text(str(proc.pid), encoding='utf-8')
+        ws.pid(run_id).write_text(str(pid), encoding='utf-8')
     except OSError as error:
         # O worker já é dono da execução; uma gravação de diagnóstico não pode desfazer isso.
         message += (
             f'\nAviso: não foi possível salvar pid.txt: {error}. '
-            f'O arquivo pode estar ausente ou desatualizado; use o PID {proc.pid} desta resposta para inspeção.'
+            f'O arquivo pode estar ausente ou desatualizado; use o PID {pid} desta resposta para inspeção.'
         )
     return message
 

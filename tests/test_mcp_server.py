@@ -41,7 +41,7 @@ class SubmissionTests(unittest.TestCase):
         }
         for expected, arguments in cases.items():
             with self.subTest(expected=expected), support.temp_workspace(server) as ws:
-                with patch.object(server.subprocess, 'Popen') as launch:
+                with patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch:
                     result = server.submit_plan(**arguments)  # type: ignore[arg-type]
                 self.assertTrue(result.startswith('Erro: '), result)
                 self.assertIn(expected, result)
@@ -146,7 +146,10 @@ class SubmissionTests(unittest.TestCase):
             self.assertEqual(report['reservation'], {'pid': 123, 'worker_alive': ANY})
 
     def test_only_first_mcp_worker_can_claim_or_release_reservation(self):
-        with support.temp_workspace(server) as ws, patch.object(server.subprocess, 'Popen') as launch:
+        with (
+            support.temp_workspace(server) as ws,
+            patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch,
+        ):
             server.submit_plan(PLAN, test_command_json='["test"]')
             argv = launch.call_args.args[0][3:]
             credential = argv[argv.index('--reservation') + 1]
@@ -240,10 +243,10 @@ class SubmissionTests(unittest.TestCase):
                 return original_write(path, *args, **kwargs)
 
             with (
-                patch.object(server.subprocess, 'Popen') as launch,
+                patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch,
                 patch.object(Path, 'write_text', denied_pid_write),
             ):
-                launch.return_value.pid = 123
+                launch.return_value = (123, True)
                 try:
                     result = server.submit_plan(PLAN, test_command_json='["test"]')
                 except PermissionError as error:
@@ -292,8 +295,11 @@ class SubmissionTests(unittest.TestCase):
             self.assertEqual(ws.lock.read_bytes(), reservation)
 
     def test_second_submission_cannot_overwrite_first(self):
-        with support.temp_workspace(server), patch.object(server.subprocess, 'Popen') as launch:
-            launch.return_value.pid = 123
+        with (
+            support.temp_workspace(server),
+            patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch,
+        ):
+            launch.return_value = (123, True)
             first = server.submit_plan(PLAN, test_command_json='["python", "-m", "unittest"]')
             second = server.submit_plan(
                 PLAN.replace('Example', 'Second'), test_command_json='["python", "-m", "unittest"]'
@@ -307,7 +313,7 @@ class SubmissionTests(unittest.TestCase):
     def test_failed_launch_releases_reservation(self):
         with (
             support.temp_workspace(server) as ws,
-            patch.object(server.subprocess, 'Popen', side_effect=OSError('launch failed')),
+            patch.object(server.process, 'launch_detached', side_effect=OSError('launch failed')),
         ):
             with self.assertRaises(OSError):
                 server.submit_plan(PLAN, test_command_json='["test"]')
@@ -326,7 +332,7 @@ class SubmissionTests(unittest.TestCase):
                         raise PermissionError('status unavailable')
                     original_write(path, value)
 
-                with patch.object(server.subprocess, 'Popen') as launch:
+                with patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch:
                     launch.side_effect = OSError('launch failed')
                     with patch.object(st, 'write_json', side_effect=write):
                         with self.assertRaisesRegex(PermissionError, 'status unavailable'):
@@ -334,7 +340,7 @@ class SubmissionTests(unittest.TestCase):
                     self.assertFalse(ws.lock.exists())
 
                     launch.side_effect = None
-                    launch.return_value.pid = 123
+                    launch.return_value = (123, True)
                     result = server.submit_plan(PLAN, test_command_json='["test"]')
                     self.assertIn('PID 123', result)
                     self.assertTrue(ws.lock.exists())
@@ -343,10 +349,13 @@ class SubmissionTests(unittest.TestCase):
 
 class SubmissionPreflightTests(support.RepositoryTestCase):
     def submit(self, **options):
-        with patch.object(server, 'WORKSPACE', self.ws), patch.object(server, 'subprocess') as fake:
-            fake.Popen.return_value.pid = 7
+        with (
+            patch.object(server, 'WORKSPACE', self.ws),
+            patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch,
+        ):
+            launch.return_value = (7, True)
             result = server.submit_plan(PLAN, test_command_json='["test"]', **options)
-        return result, fake.Popen
+        return result, launch
 
     def test_unusable_repository_is_refused_without_reserving(self):
         cases = {

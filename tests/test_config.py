@@ -115,14 +115,14 @@ class PinnedCommandTests(unittest.TestCase):
         with (
             support.temp_workspace(server) as ws,
             patch.object(config, 'TEST_COMMAND', ['pytest']),
-            patch.object(server.subprocess, 'Popen') as launch,
+            patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch,
         ):
             result = server.submit_plan(self.PLAN, test_command_json='["curl", "x"]')
             self.assertTrue(result.startswith('Erro: '), result)
             self.assertIn('["pytest"]', result)
             launch.assert_not_called()
             self.assertFalse(ws.lock.exists())
-            launch.return_value.pid = 5
+            launch.return_value = (5, True)
             self.assertIn('PID 5', server.submit_plan(self.PLAN, test_command_json='["pytest"]'))
 
     def test_worker_refuses_before_resolving_the_executable(self):

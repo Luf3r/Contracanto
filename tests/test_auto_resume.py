@@ -52,12 +52,12 @@ class AutoResumeTests(support.RepositoryTestCase):
         with (
             patch.object(server, 'WORKSPACE', self.ws),
             patch.object(server, 'WAIT_POLL_INTERVAL', 0.05),
-            patch.object(server, 'subprocess') as fake,
+            patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch,
         ):
             # O worker relançado é simulado por um processo que continua vivo: o do teste.
-            fake.Popen.return_value.pid = os.getpid()
+            launch.return_value = (os.getpid(), True)
             summary = json.loads(asyncio.run(server.wait_for_run(timeout)))
-        return summary, fake.Popen
+        return summary, launch
 
     def test_dead_worker_is_relaunched_once_with_the_remaining_tasks(self):
         with self.repository() as (root, store, base, task, git):

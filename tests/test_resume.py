@@ -117,11 +117,10 @@ class ResumeTests(support.RepositoryTestCase):
             for _ in self.first_run(task):
                 with (
                     patch.object(server, 'WORKSPACE', self.ws),
-                    patch.object(server, 'subprocess') as fake,
+                    patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch,
                 ):
                     # Só o lançamento do worker é simulado; o Git da retomada é real.
-                    launch = fake.Popen
-                    launch.return_value.pid = 123
+                    launch.return_value = (123, True)
                     result = server.resume_run(parallel=1, retries=0, branch='lote-2', test_command_json='["test"]')
                     self.assertIn('PID 123', result)
                     argv = launch.call_args.args[0]
@@ -131,7 +130,10 @@ class ResumeTests(support.RepositoryTestCase):
                     st.release_run(self.ws, argv[argv.index('--reservation') + 1])
 
     def test_mcp_resume_without_a_previous_run_is_an_error(self):
-        with support.temp_workspace(server) as ws, patch.object(server.subprocess, 'Popen') as launch:
+        with (
+            support.temp_workspace(server) as ws,
+            patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch,
+        ):
             result = server.resume_run(test_command_json='["test"]')
             self.assertTrue(result.startswith('Erro: '), result)
             launch.assert_not_called()
