@@ -89,6 +89,7 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_REVIEW_TIMEOUT` | 900 | Segundos para cada chamada ao revisor |
 | `CONTRACANTO_GIT_TIMEOUT` | 180 | Segundos para cada comando Git |
 | `CONTRACANTO_REVIEW_MODEL` | `sonnet` | Modelo usado pelo revisor |
+| `CONTRACANTO_AGENT_MODEL` | sem valor | Modelo do executor, passado ao `agy` em `--model` (ids em `agy models`, por exemplo `gemini-4-hydrogen-high`); sem valor, vale o padrão do `agy` |
 | `CONTRACANTO_AGENT_RETRIES` | 1 | Novas chamadas ao `agy` quando uma implementação ou correção falha (0 a 3) |
 | `CONTRACANTO_AUTO_RESUME` | 1 | Vezes que `wait_for_run` relança sozinho uma execução cujo worker morreu (0 a 3; 0 desliga) |
 | `CONTRACANTO_REVIEW_PATCH_LIMIT` | 400000 | Tamanho máximo do patch enviado ao revisor, em caracteres |

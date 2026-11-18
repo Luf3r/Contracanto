@@ -21,7 +21,7 @@ log = logging.getLogger('contracanto')
 IMPLEMENT_PROMPT = (
     'Você está implementando UMA tarefa no Git worktree atual. '
     'Leia GEMINI.md quando presente. Preserve a branch atual. '
-    'Não altere arquitetura, não faça commit/push/deploy. '
+    'Não altere a arquitetura além do que a tarefa pede. Não faça commit/push/deploy. '
     'Não acesse segredos. NÃO altere arquivos fora da lista files. '
     'Se houver conflito de escopo, reporte sem implementar.\n'
 )
@@ -140,6 +140,7 @@ def run_agy(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
             'auto',
             '--print-timeout',
             config.AGENT_PRINT_TIMEOUT,
+            *(['--model', config.AGENT_MODEL] if config.AGENT_MODEL else []),
         ],
         cwd=wt,
         timeout=config.AGENT_TIMEOUT,
@@ -215,7 +216,11 @@ def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifa
     gitops.check_checkout(wt, base, branch)
     gitops.check_scope(task, wt, base)
     if not gitops.changed_files(wt):
-        raise RuntimeError(f'O executor não alterou arquivos em {task["id"]}')
+        # O relatório costuma explicar a recusa; sem ele, o motivo fica só no log do agy.
+        raise RuntimeError(
+            f'O executor não alterou arquivos em {task["id"]}. Relatório do executor:\n'
+            + (report.strip()[-config.ERROR_TAIL :] or '(vazio)')
+        )
     gitops.commit_all(wt, commit_message(ctx, task))
     return Artifact(task=task, worktree=str(wt), report=report, commit=gitops.head(wt), branch=branch, context=context)
 

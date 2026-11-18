@@ -47,6 +47,15 @@ class ImplementationRetryTests(support.RepositoryTestCase):
             self.assertEqual(len(calls), config.AGENT_RETRIES + 1)
             self.assertIn('falha passageira', support.read_status(self.ws)['details']['A']['error'])
 
+    def test_report_of_an_executor_that_changed_nothing_reaches_the_status(self):
+        with self.repository() as (root, store, base, task, git):
+            with patch.object(agents, 'run_agy', return_value='Conflito de escopo: falta app.py em files'):
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, PASS)
+            self.assertEqual(states, {'A': 'failed'})
+            error = support.read_status(self.ws)['details']['A']['error']
+            self.assertIn('não alterou arquivos', error)
+            self.assertIn('falta app.py em files', error)
+
     def test_uncertain_state_is_never_retried(self):
         with self.repository() as (root, store, base, task, git):
             calls = []

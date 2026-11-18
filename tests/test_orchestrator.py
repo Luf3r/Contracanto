@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import support
 
-from contracanto import agents, cli, gitops, runner
+from contracanto import agents, cli, config, gitops, runner
 from contracanto import process as proc
 from contracanto import state as st
 from contracanto.plan import validate
@@ -70,6 +70,27 @@ class RegressionTests(unittest.TestCase):
             agents.review(agents.Artifact(task=task('A'), worktree='.', report='done'), ['python', 'test.py'])
         review_args = next(args for args in calls if args[0] == 'claude')
         self.assertEqual(review_args[review_args.index('--model') + 1], 'sonnet')
+
+    def agy_args(self):
+        calls = []
+
+        def command(args, **kwargs):
+            calls.append(args)
+            result = {'status': 'SUCCESS', 'response': 'done'}
+            return subprocess.CompletedProcess(args, 0, json.dumps({'event': 'result', 'result': result}), '')
+
+        with patch.object(proc, 'run', side_effect=command):
+            agents.run_agy('prompt', '.')
+        return calls[0]
+
+    def test_executor_model_comes_from_the_environment(self):
+        with patch.object(config, 'AGENT_MODEL', 'gemini-4-hydrogen-high'):
+            args = self.agy_args()
+        self.assertEqual(args[args.index('--model') + 1], 'gemini-4-hydrogen-high')
+
+    def test_executor_without_model_keeps_the_agy_default(self):
+        with patch.object(config, 'AGENT_MODEL', ''):
+            self.assertNotIn('--model', self.agy_args())
 
     def simulate(
         self, tasks, executor=None, integration_error=None, revert_fails=False, abort_error=False, pick_error=False

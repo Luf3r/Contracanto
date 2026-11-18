@@ -19,7 +19,7 @@ class ConfigTests(unittest.TestCase):
     def read_config(self, **env):
         code = (
             'import json; from contracanto import config as c; '
-            'print(json.dumps([c.TEST_TIMEOUT, c.AGENT_TIMEOUT, c.AGENT_PRINT_TIMEOUT, c.REVIEW_MODEL]))'
+            'print(json.dumps([c.TEST_TIMEOUT, c.AGENT_TIMEOUT, c.AGENT_PRINT_TIMEOUT, c.REVIEW_MODEL, c.AGENT_MODEL]))'
         )
         environment = {k: v for k, v in os.environ.items() if not k.startswith('CONTRACANTO_')}
         environment.update(env, PYTHONPATH=str(ROOT))
@@ -28,13 +28,16 @@ class ConfigTests(unittest.TestCase):
 
     def test_defaults(self):
         result = self.read_config()
-        self.assertEqual(json.loads(result.stdout), [600, 1600, '25m', 'sonnet'])
+        self.assertEqual(json.loads(result.stdout), [600, 1600, '25m', 'sonnet', ''])
 
     def test_environment_overrides(self):
         result = self.read_config(
-            CONTRACANTO_TEST_TIMEOUT='1200', CONTRACANTO_AGENT_TIMEOUT='3700', CONTRACANTO_REVIEW_MODEL='opus'
+            CONTRACANTO_TEST_TIMEOUT='1200',
+            CONTRACANTO_AGENT_TIMEOUT='3700',
+            CONTRACANTO_REVIEW_MODEL='opus',
+            CONTRACANTO_AGENT_MODEL='gemini-4-hydrogen-high',
         )
-        self.assertEqual(json.loads(result.stdout), [1200, 3700, '60m', 'opus'])
+        self.assertEqual(json.loads(result.stdout), [1200, 3700, '60m', 'opus', 'gemini-4-hydrogen-high'])
 
     def test_invalid_value_names_the_variable(self):
         for value in ('dez', '0', '-5'):

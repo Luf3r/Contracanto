@@ -1,6 +1,6 @@
 """Limites, tempos e parâmetros dos CLIs externos.
 
-Os tempos e o modelo do revisor podem ser ajustados por variáveis de ambiente
+Os tempos e os modelos do executor e do revisor podem ser ajustados por variáveis de ambiente
 `CONTRACANTO_<NOME>` (por exemplo `CONTRACANTO_TEST_TIMEOUT=1200`), lidas ao
 importar o pacote. O worker lançado pelo MCP herda o ambiente do servidor.
 """
@@ -89,6 +89,8 @@ STOP_POLL_INTERVAL = 0.25
 # O limite interno do agy fica abaixo de AGENT_TIMEOUT para que ele reporte o próprio timeout.
 AGENT_PRINT_TIMEOUT = f'{int(AGENT_TIMEOUT - 100) // 60}m'
 REVIEW_MODEL = _text('REVIEW_MODEL', 'sonnet')
+# Modelo do executor, passado ao agy em --model; vazio deixa o padrão do agy (veja `agy models`).
+AGENT_MODEL = _text('AGENT_MODEL', '')
 # Novas chamadas ao agy quando uma implementação ou correção falha sem deixar o worktree
 # em estado incerto.
 AGENT_RETRIES = _count('AGENT_RETRIES', 1, range(4))
@@ -116,6 +118,7 @@ TUNABLE = (
     'AGENT_TIMEOUT',
     'REVIEW_TIMEOUT',
     'REVIEW_MODEL',
+    'AGENT_MODEL',
     'AGENT_RETRIES',
     'AUTO_RESUME',
     'REVIEW_PATCH_LIMIT',
