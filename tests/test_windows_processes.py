@@ -294,6 +294,12 @@ class DetachedWorkerJobTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Windows Job Objects')
 class DetachedLaunchTests(unittest.TestCase):
+    def wait_for_exit(self, pid):
+        # O worker segura o log e o diretório até sair; a pasta temporária só sai depois.
+        deadline = time.monotonic() + 30
+        while proc.pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+
     def wait_for_text(self, path, text):
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
@@ -311,6 +317,7 @@ class DetachedLaunchTests(unittest.TestCase):
             env = dict(os.environ, CONTRACANTO_PROBE='ação ok')
             pid, outside = proc.launch_detached([sys.executable, '-c', code], log=log, cwd=directory, env=env)
             content = self.wait_for_text(log, 'ambiente')
+            self.wait_for_exit(pid)
         self.assertTrue(outside)
         self.assertNotIn('WMI indisponível', content)
         self.assertIn('ação ok', content)
@@ -321,10 +328,11 @@ class DetachedLaunchTests(unittest.TestCase):
             log = directory / 'run.log'
             log.write_text('', encoding='utf-8')
             with patch.object(proc, '_create_with_wmi', side_effect=OSError('negado por política')):
-                proc.launch_detached(
+                pid, _ = proc.launch_detached(
                     [sys.executable, '-c', 'print("fallback ok")'], log=log, cwd=directory, env=os.environ
                 )
             content = self.wait_for_text(log, 'fallback ok')
+            self.wait_for_exit(pid)
         self.assertIn('WMI indisponível', content)
         self.assertIn('negado por política', content)
 

@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import config, gitops, process
 from .errors import RecoveryRequired, RunCancelled, describe
@@ -23,7 +24,10 @@ IMPLEMENT_PROMPT = (
     'Leia GEMINI.md quando presente. Preserve a branch atual. '
     'Não altere a arquitetura além do que a tarefa pede. Não faça commit/push/deploy. '
     'Não acesse segredos. NÃO altere arquivos fora da lista files. '
-    'Se houver conflito de escopo, reporte sem implementar.\n'
+    'Se houver conflito de escopo, reporte sem implementar. '
+    'Se o pedido trouxer base_tests, os testes já falham antes da sua alteração: corrija essas '
+    'falhas quando a tarefa pedir ou quando os critérios dependerem delas, e cite-as no relatório; '
+    'a tarefa só é aprovada com os testes passando.\n'
 )
 REPAIR_PROMPT = (
     'Corrija a tarefa abaixo considerando a revisão. Preserve a branch atual. '
@@ -32,9 +36,16 @@ REPAIR_PROMPT = (
 REVIEW_PROMPT = (
     'Você é revisor de código. Verifique a task e o diff contra critérios de aceitação. '
     'Testes não executados NÃO equivalem a testes aprovados. Não modifique arquivos. '
+    'test_command é a única verificação que rodou, no worktree e na integração: um critério que exige '
+    'outra verificação (lint, tipos, build, outro script) não está comprovado pela saída dos testes; '
+    'nesse caso rejeite e diga qual verificação faltou. '
+    'Separe defeito herdado de defeito da tarefa: o que já existia na base, inclusive as falhas de '
+    'base_test_output quando presente, não impede a aprovação, salvo quando a tarefa pede para corrigir; '
+    'liste esses pontos em inherited, não em problems. '
     'Responda SOMENTE com um objeto JSON, sem texto antes ou depois, no formato '
     '{"verdict": "APPROVED" ou "REJECTED", "summary": "uma frase", '
-    '"problems": ["cada problema que impede a aprovação"]}.\n'
+    '"problems": ["cada problema da tarefa que impede a aprovação"], '
+    '"inherited": ["cada problema que já existia na base"]}.\n'
 )
 VERDICTS = ('APPROVED', 'REJECTED')
 COMMIT_SUBJECT_LENGTH = 72
@@ -79,7 +90,23 @@ def parse_verdict(response: str) -> Verdict:
     if isinstance(problems, str):
         problems = [problems]
     lines.extend(f'- {problem}' for problem in problems if str(problem).strip())
+    inherited = data.get('inherited') or []
+    if isinstance(inherited, str):
+        inherited = [inherited]
+    lines.extend(f'- herdado da base: {item}' for item in inherited if str(item).strip())
     return Verdict(verdict == 'APPROVED', '\n'.join(lines))
+
+
+@dataclass(frozen=True)
+class BaseTests:
+    """Resultado dos testes na base do lote, antes de qualquer alteração."""
+
+    returncode: int
+    output: str
+
+
+class InheritedFailure(RuntimeError):
+    """Os testes já falhavam na base e continuam falhando: revisão e correções não ajudam."""
 
 
 @dataclass
@@ -92,6 +119,8 @@ class Artifact:
     commit: str | None = None
     branch: str | None = None
     context: str = ''
+    # Presente quando os testes já falhavam na base, antes da implementação.
+    base_failure: BaseTests | None = None
 
     @property
     def candidate(self) -> str:
@@ -209,12 +238,37 @@ def commit_message(ctx: RunContext, task: Task) -> str:
     return f'{task_id}: {summary}\n\nTarefa {task_id} da execução {ctx.run_id[:12]} do Contracanto.'
 
 
+def base_tests(ctx: RunContext, wt: Path, base: str, branch: str) -> BaseTests | None:
+    """Testa a base uma vez por lote, no primeiro worktree preparado sobre ela.
+
+    O resultado separa o que a base já traz de quebrado do que a tarefa introduz.
+    """
+    tests = ctx.tests
+    if not tests:
+        return None
+
+    def compute() -> BaseTests:
+        result = gitops.run_tests(tests, wt, base, expected_branch=branch, stop=ctx.stop)
+        output = (result.stdout + '\n' + result.stderr)[-config.TEST_OUTPUT_TAIL :]
+        outcome = f'falharam (código {result.returncode})' if result.returncode else 'passaram'
+        log.info('Testes da base %s: %s', base[:12], outcome)
+        return BaseTests(result.returncode, output)
+
+    baseline: BaseTests = ctx.baseline(base, compute)
+    return baseline
+
+
 def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifact:
     ctx.stop.check()
     wt = make_worktree(ctx, task, base)
     branch = gitops.branch_ref(wt)
     prepare_worktree(ctx, wt, base, branch)
-    prompt = _with_payload(IMPLEMENT_PROMPT, {'task': task, 'context': context})
+    baseline = base_tests(ctx, wt, base, branch)
+    failure = baseline if baseline is not None and baseline.returncode else None
+    payload: dict[str, Any] = {'task': task, 'context': context}
+    if failure is not None:
+        payload['base_tests'] = {'exit_code': failure.returncode, 'output': failure.output}
+    prompt = _with_payload(IMPLEMENT_PROMPT, payload)
     report = call_agent(ctx, task, prompt, wt, base, branch)
     gitops.check_checkout(wt, base, branch)
     gitops.check_scope(task, wt, base)
@@ -225,7 +279,15 @@ def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifa
             + (report.strip()[-config.ERROR_TAIL :] or '(vazio)')
         )
     gitops.commit_all(wt, commit_message(ctx, task))
-    return Artifact(task=task, worktree=str(wt), report=report, commit=gitops.head(wt), branch=branch, context=context)
+    return Artifact(
+        task=task,
+        worktree=str(wt),
+        report=report,
+        commit=gitops.head(wt),
+        branch=branch,
+        context=context,
+        base_failure=failure,
+    )
 
 
 def repair(ctx: RunContext, artifact: Artifact, base: str, context: str, feedback: str) -> None:
@@ -267,6 +329,15 @@ def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | N
         raise RuntimeError('HEAD do worktree difere do commit candidato')
     test = gitops.run_tests(test_command, wt, head, expected_branch=artifact.branch, stop=stop)
     test_output = (test.stdout + '\n' + test.stderr)[-config.TEST_OUTPUT_TAIL :]
+    base = artifact.base_failure
+    if test.returncode and base is not None:
+        # A aprovação exige testes verdes; com a base vermelha, nem revisão nem correção ajudam.
+        raise InheritedFailure(
+            f'Os testes já falhavam na base (código {base.returncode}) e continuam falhando no worktree '
+            f'(código {test.returncode}). Corrija a base antes, com uma tarefa própria, ou ajuste o comando '
+            f'de testes.\nSaída na base:\n{base.output[-config.ERROR_TAIL :]}'
+            f'\nSaída no worktree:\n{test_output[-config.ERROR_TAIL :]}'
+        )
     summary = gitops.git('show', '--format=medium', '--stat', gitops.ALL_SUBMODULES, 'HEAD', cwd=wt).stdout
     patch_bytes = gitops.git(
         'show',
@@ -294,8 +365,10 @@ def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | N
             'patch': patch,
             'patch_encoding': encoding,
             'executor_report': artifact.report,
+            'test_command': list(test_command),
             'test_exit_code': test.returncode,
             'test_output': test_output,
+            **({'base_test_exit_code': base.returncode, 'base_test_output': base.output} if base is not None else {}),
         },
     )
     # Fora do worktree: o revisor recebe tudo pelo pedido e não deve carregar as instruções

@@ -123,6 +123,7 @@ def execute(
                 },
             )
     ctx = RunContext.open(ws, run_id, keep_worktrees, setup, branch)
+    ctx.tests = tests
     run = ctx.state
     keep_lock = False
     try:

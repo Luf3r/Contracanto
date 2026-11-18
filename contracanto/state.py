@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import hashlib
 import json
@@ -12,7 +13,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -327,6 +328,28 @@ class RunContext:
     setup: Sequence[str] | None = None
     # Branch nova, criada no início, que recebe os commits em vez da branch em uso.
     branch: str | None = None
+    # Comando de testes da execução; sem ele, a base não é testada antes da implementação.
+    tests: Sequence[str] | None = None
+    _baselines: dict[str, concurrent.futures.Future] = field(default_factory=dict, repr=False)
+    _baseline_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def baseline(self, base: str, compute: Callable[[], Any]) -> Any:
+        """Resultado de `compute` para a base, calculado uma vez e compartilhado pelo lote.
+
+        A primeira tarefa sobre a base calcula; as outras esperam o mesmo resultado ou erro.
+        """
+        with self._baseline_lock:
+            future = self._baselines.get(base)
+            owner = future is None
+            if future is None:
+                future = self._baselines[base] = concurrent.futures.Future()
+        if owner:
+            try:
+                future.set_result(compute())
+            except BaseException as error:
+                future.set_exception(error)
+                raise
+        return future.result()
 
     @classmethod
     def open(

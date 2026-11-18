@@ -75,7 +75,12 @@ class ReviewGateTests(support.RepositoryTestCase):
                     repairs.append(request['review'])
                 return agent(prompt, wt)
 
-            command = [sys.executable, '-c', "import sys; sys.exit('missing expected record')"]
+            # Passa na base, sem allowed.txt, e falha depois da implementação.
+            command = [
+                sys.executable,
+                '-c',
+                "import os, sys; sys.exit('missing expected record' if os.path.exists('allowed.txt') else 0)",
+            ]
             with patch.object(agents, 'run_agy', side_effect=capture_repair):
                 result = runner.execute(self.ws, {'tasks': [task]}, 1, 1, command)
             self.assertEqual(result, {'A': 'failed'})
@@ -95,7 +100,12 @@ class ReviewGateTests(support.RepositoryTestCase):
                     seen_at_repair.append(support.read_status(self.ws)['details']['A'])
                 return agent(prompt, wt)
 
-            command = [sys.executable, '-c', "import sys; sys.exit('registro esperado ausente')"]
+            # Passa na base, sem allowed.txt, e falha depois da implementação.
+            command = [
+                sys.executable,
+                '-c',
+                "import os, sys; sys.exit('registro esperado ausente' if os.path.exists('allowed.txt') else 0)",
+            ]
             with (
                 patch.object(agents, 'run_agy', side_effect=capture_repair),
                 self.assertLogs('contracanto', 'INFO') as logs,

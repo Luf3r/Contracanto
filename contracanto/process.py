@@ -155,6 +155,7 @@ else:
 
 DETACH_TIMEOUT = 60
 DETACH_POLL_INTERVAL = 0.05
+DETACH_EXIT_TIMEOUT = 10
 
 
 def launch_detached(
@@ -254,6 +255,11 @@ def _detach_result(result: Path, intermediate: int) -> tuple[int, bool]:
             raise RuntimeError('O intermediário que lança o worker terminou sem lançá-lo')
         time.sleep(DETACH_POLL_INTERVAL)
     report = json.loads(result.read_text(encoding='utf-8'))
+    # O intermediário sai logo depois de responder. Esperá-lo libera o arquivo temporário e o
+    # diretório de trabalho que ele ainda segura; um atraso aqui não impede o worker.
+    exit_deadline = time.monotonic() + DETACH_EXIT_TIMEOUT
+    while pid_alive(intermediate) and time.monotonic() < exit_deadline:
+        time.sleep(DETACH_POLL_INTERVAL)
     if 'error' in report:
         raise RuntimeError(f'O intermediário não lançou o worker: {report["error"]}')
     return int(report['pid']), bool(report['outside_job'])
