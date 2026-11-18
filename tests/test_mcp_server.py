@@ -249,6 +249,8 @@ class SubmissionTests(unittest.TestCase):
                 except PermissionError as error:
                     self.fail(f'Launched worker was reported as a failed submission: {error}')
                 self.assertIn('iniciada com PID 123', result)
+                self.assertIn(server.watch_command_line(ws), result)
+                self.assertIn('run_in_background', result)
                 self.assertIn('Aviso:', result)
                 self.assertIn('pid.txt', result)
                 self.assertIn('pid file locked', result)
@@ -374,3 +376,32 @@ class SubmissionPreflightTests(support.RepositoryTestCase):
             # A branch só é criada pelo worker.
             self.assertEqual(git('branch', '--list', 'lote').stdout.strip(), '')
             st.release_run(self.ws, argv[argv.index('--reservation') + 1])
+
+
+class WatchCommandTests(unittest.TestCase):
+    def test_prefers_the_installed_executable_and_falls_back_to_the_module(self):
+        with support.temp_dir() as directory:
+            ws = st.Workspace.for_root(directory)
+            scripts = directory / 'Scripts'
+            scripts.mkdir()
+            python = scripts / 'python.exe'
+            with patch.object(server.sys, 'executable', str(python)):
+                self.assertEqual(server.watch_command(ws)[1:3], ['-m', 'contracanto'])
+                (scripts / 'contracanto.exe').write_text('')
+                command = server.watch_command(ws)
+        self.assertEqual(command, [(scripts / 'contracanto.exe').as_posix(), '--watch', '--repo', ws.root.as_posix()])
+        self.assertNotIn('\\', ' '.join(command))
+
+    def test_command_line_quotes_paths_with_spaces(self):
+        with support.temp_dir() as directory:
+            ws = st.Workspace.for_root(directory / 'meu projeto')
+            self.assertIn(f'"{ws.root.as_posix()}"', server.watch_command_line(ws))
+
+    def test_printed_command_runs_and_reports_the_outcome(self):
+        with support.temp_dir() as directory:
+            ws = st.Workspace.for_root(directory)
+            result = subprocess.run(
+                server.watch_command(ws), capture_output=True, text=True, timeout=60, env=server.worker_env()
+            )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('Nenhuma execução registrada', result.stdout)

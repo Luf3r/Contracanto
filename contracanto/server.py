@@ -81,6 +81,24 @@ def worker_argv(
     ]
 
 
+def watch_command(ws: state.Workspace) -> list[str]:
+    """Comando que acompanha a execução e sai quando ela termina (`contracanto --watch`).
+
+    Usa o executável `contracanto` instalado ao lado deste Python, que não depende de
+    PYTHONPATH; sem ele, o próprio Python com `-m contracanto`.
+    """
+    scripts = Path(sys.executable).parent
+    for name in ('contracanto.exe', 'contracanto'):
+        if (scripts / name).is_file():
+            return [(scripts / name).as_posix(), '--watch', '--repo', ws.root.as_posix()]
+    return [Path(sys.executable).as_posix(), '-m', 'contracanto', '--watch', '--repo', ws.root.as_posix()]
+
+
+def watch_command_line(ws: state.Workspace) -> str:
+    # Barras normais e aspas duplas valem tanto no Git Bash do Claude Code quanto no cmd.
+    return ' '.join(f'"{part}"' if ' ' in part or not part else part for part in watch_command(ws))
+
+
 def worker_env() -> dict[str, str]:
     env = dict(os.environ, PYTHONIOENCODING='utf-8')
     env['PYTHONPATH'] = os.pathsep.join(filter(None, [str(PACKAGE_PARENT), env.get('PYTHONPATH')]))
@@ -113,6 +131,8 @@ def submit_plan(
     aprovados em vez da branch em uso. O checkout do repositório fica nela ao final.
     O operador pode fixar os comandos aceitos (CONTRACANTO_TEST_COMMAND e
     CONTRACANTO_SETUP_COMMAND); um comando diferente é recusado com o valor esperado.
+    A resposta traz o comando `contracanto --watch` desta execução: rodado em segundo plano,
+    ele sai quando a execução termina e avisa quem o lançou, sem consultas repetidas.
     Forneça somente projetos, planos e comandos de teste confiáveis. O comando e o código
     testado rodam com as permissões locais do worker antes da revisão e após a integração.
     Podem acessar arquivos fora do worktree, credenciais e rede, inclusive para push ou deploy.
@@ -189,6 +209,11 @@ def _launch(
     message = (
         f'Execução {run_id} iniciada com PID {proc.pid}. Acompanhe com wait_for_run ou get_run_status. '
         'O início não representa aprovação das tarefas.'
+        '\nPara ser avisado do fim sem consultar, rode em segundo plano (no Claude Code, Bash com '
+        f'run_in_background): {watch_command_line(ws)}\n'
+        'O comando escreve uma linha por mudança de estado e sai quando a execução termina, com o '
+        'resumo de wait_for_run: código 0 se todas as tarefas foram aprovadas, 1 se alguma não foi, '
+        '3 se o worker morreu. Com 3, chame wait_for_run, que relança as tarefas que faltam.'
     )
     if not outside_job:
         message += (
