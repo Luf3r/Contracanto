@@ -263,7 +263,9 @@ def stop_run(run_id: str | None = None) -> str:
 def get_run_status() -> str:
     """Retorna um objeto JSON com o estado da execução reservada ou, sem reserva, da mais recente.
     run: status persistido (state, run_id, started_at, finished_at, duration_seconds, statuses,
-    details, timings por tarefa e fase, recovery_required, error) ou null.
+    details, timings por tarefa e fase, recovery_required, error) ou null. details.<id>.reviews
+    traz cada parecer do revisor assim que ele sai, inclusive o motivo de uma rejeição antes
+    da correção.
     reservation_state: "active", "none" ou "incomplete"; reservation traz run_id, pid, stop_requested
     e worker_alive. Com worker_alive false a execução não vai mais avançar sozinha: chame
     wait_for_run, que tenta a retomada automática, e avise o operador se ela não for possível.

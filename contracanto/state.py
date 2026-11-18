@@ -264,6 +264,14 @@ class RunState:
         with self._lock:
             self.details.setdefault(task_id, {}).update(fields)
 
+    def add_review(self, task_id: str, attempt: int, approved: bool, feedback: str) -> None:
+        """Acrescenta um parecer ao histórico `reviews` da tarefa; `review` fica com o mais recente."""
+        with self._lock:
+            detail = self.details.setdefault(task_id, {})
+            detail['review'] = feedback
+            entry = {'attempt': attempt, 'approved': approved, 'at': now(), 'feedback': feedback}
+            detail.setdefault('reviews', []).append(entry)
+
     def set_details(self, task_id: str, fields: dict[str, Any]) -> None:
         with self._lock:
             self.details[task_id] = fields

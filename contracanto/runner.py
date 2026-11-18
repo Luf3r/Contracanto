@@ -359,6 +359,34 @@ def run_batch(ctx: RunContext, batch: Sequence[Task], base: str, context: str, m
     return artifacts
 
 
+REVIEW_LOG_LIMIT = 1500
+
+
+def _record_review(ctx: RunContext, task_id: str, attempt: int, approved: bool, feedback: str) -> None:
+    """Grava o parecer assim que ele sai, sem esperar a tarefa terminar.
+
+    `reviews` guarda o histórico da tarefa e `review` o parecer mais recente. Uma rejeição
+    também vai para o log, para quem acompanha a execução ver o motivo antes da correção.
+    """
+    run = ctx.state
+    run.add_review(task_id, attempt, approved, feedback)
+    if not approved:
+        excerpt = feedback.strip()
+        if len(excerpt) > REVIEW_LOG_LIMIT:
+            excerpt = excerpt[:REVIEW_LOG_LIMIT].rstrip() + ' […] (parecer completo em get_run_status)'
+        log.info(
+            '%s: motivo da rejeição %d:\n%s',
+            task_id,
+            attempt,
+            '\n'.join('    ' + line for line in excerpt.splitlines()),
+        )
+    try:
+        run.save()
+    except OSError as error:
+        # O parecer continua na memória e sai na próxima gravação do estado.
+        log.info('%s: parecer não gravado agora: %s', task_id, _summary(error))
+
+
 def review_task(
     ctx: RunContext, artifact: Artifact, base: str, context: str, retries: int, tests: Sequence[str]
 ) -> str | None:
@@ -379,6 +407,7 @@ def review_task(
             with run.phase(task_id, 'review'):
                 approved, feedback = agents.review(artifact, tests, ctx.stop)
             log.info('%s: revisão %d %s', task_id, attempt + 1, 'aprovada' if approved else 'rejeitada')
+            _record_review(ctx, task_id, attempt + 1, approved, feedback)
             if approved:
                 return feedback
             if attempt == retries:

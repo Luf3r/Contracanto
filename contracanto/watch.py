@@ -183,6 +183,18 @@ def render(report: dict[str, Any], log: str, now: datetime, width: int = 100, co
     tally = ' · '.join(f'{counts[s]} {s}' for s in order if counts.get(s))
     lines += ['', f'  {sum(counts.values())} tarefa(s): {tally}' if tally else '  sem tarefas']
 
+    rejected = [
+        (task_id, review)
+        for task_id, detail in details.items()
+        if isinstance(detail, dict) and statuses.get(task_id) in state.UNFINISHED_STATUSES
+        for review in (last_rejection(detail),)
+        if review
+    ]
+    if rejected:
+        lines += ['', p.bold('Revisões rejeitadas')]
+        for task_id, review in rejected:
+            lines.append('  ' + p.paint(task_id, 'review') + ': ' + _clip(review, width - len(task_id) - 4))
+
     errors = [(task_id, detail.get('error')) for task_id, detail in details.items() if isinstance(detail, dict)]
     errors = [(task_id, error) for task_id, error in errors if error]
     if run.get('error'):
@@ -199,6 +211,21 @@ def render(report: dict[str, Any], log: str, now: datetime, width: int = 100, co
     return lines
 
 
+def review_summary(entry: dict[str, Any]) -> str:
+    """Primeira linha útil de um parecer: o resumo do revisor, sem o veredito."""
+    lines = [line.strip() for line in str(entry.get('feedback') or '').splitlines() if line.strip()]
+    if lines and lines[0] in ('APPROVED', 'REJECTED'):
+        lines = lines[1:]
+    return f'revisão {entry.get("attempt")} rejeitada: ' + (' '.join(lines[:3]) or 'sem parecer')
+
+
+def last_rejection(detail: dict[str, Any]) -> str | None:
+    reviews = detail.get('reviews') or []
+    if reviews and isinstance(reviews[-1], dict) and not reviews[-1].get('approved'):
+        return review_summary(reviews[-1])
+    return None
+
+
 def transitions(previous: dict[str, Any] | None, report: dict[str, Any]) -> list[str]:
     """Mudanças de estado entre dois relatórios, uma por linha, para saída sem terminal."""
     run = report['run'] or {}
@@ -213,6 +240,14 @@ def transitions(previous: dict[str, Any] | None, report: dict[str, Any]) -> list
     for task_id, status in (run.get('statuses') or {}).items():
         if old.get(task_id) != status:
             lines.append(f'{stamp} {task_id}: {old.get(task_id, "—")} → {status}')
+    old_details: dict[str, Any] = before.get('details') or {}
+    for task_id, detail in (run.get('details') or {}).items():
+        if not isinstance(detail, dict):
+            continue
+        seen = len((old_details.get(task_id) or {}).get('reviews') or [])
+        for entry in (detail.get('reviews') or [])[seen:]:
+            if isinstance(entry, dict) and not entry.get('approved'):
+                lines.append(f'{stamp} {task_id}: {_clip(review_summary(entry), 300)}')
     return lines
 
 

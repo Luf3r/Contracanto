@@ -145,3 +145,32 @@ class WatchCliTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+REJECTED = {
+    'attempt': 1,
+    'approved': False,
+    'feedback': 'REJECTED\nFalta tratar o caso vazio.\n- lista vazia quebra o parser',
+}
+
+
+class ReviewVisibilityTests(unittest.TestCase):
+    def test_panel_shows_the_latest_rejection_while_the_task_runs(self):
+        run = report(statuses={'A': 'running'}, details={'A': {'reviews': [REJECTED]}})
+        text = '\n'.join(watch.render(run, '', NOW))
+        self.assertIn('Revisões rejeitadas', text)
+        self.assertIn('A: revisão 1 rejeitada: Falta tratar o caso vazio.', text)
+
+    def test_approved_or_finished_tasks_hide_old_rejections(self):
+        approved = {**REJECTED, 'attempt': 2, 'approved': True}
+        run = report(statuses={'A': 'running'}, details={'A': {'reviews': [REJECTED, approved]}})
+        self.assertNotIn('Revisões rejeitadas', '\n'.join(watch.render(run, '', NOW)))
+        finished = report('failed', {'A': 'failed'}, details={'A': {'reviews': [REJECTED]}})
+        self.assertNotIn('Revisões rejeitadas', '\n'.join(watch.render(finished, '', NOW)))
+
+    def test_line_mode_reports_each_new_rejection_once(self):
+        before = report(statuses={'A': 'review'}, details={'A': {}})
+        after = report(statuses={'A': 'review'}, details={'A': {'reviews': [REJECTED]}})
+        (line,) = watch.transitions(before, after)
+        self.assertIn('A: revisão 1 rejeitada: Falta tratar o caso vazio.', line)
+        self.assertEqual(watch.transitions(after, after), [])

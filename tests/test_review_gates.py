@@ -83,3 +83,30 @@ class ReviewGateTests(support.RepositoryTestCase):
             self.assertIn('missing expected record', repairs[0])
             state = support.read_status(self.ws)
             self.assertIn('missing expected record', state['details']['A']['error'])
+
+    def test_rejection_reason_is_recorded_before_the_repair(self):
+        with self.repository() as (root, store, base, task, git):
+            agent = agents.run_agy
+            seen_at_repair = []
+
+            def capture_repair(prompt, wt, stop=None):
+                if 'review' in json.loads(prompt.split('\n', 1)[1]):
+                    # O estado gravado no disco, como get_run_status e o --watch o leem.
+                    seen_at_repair.append(support.read_status(self.ws)['details']['A'])
+                return agent(prompt, wt)
+
+            command = [sys.executable, '-c', "import sys; sys.exit('registro esperado ausente')"]
+            with (
+                patch.object(agents, 'run_agy', side_effect=capture_repair),
+                self.assertLogs('contracanto', 'INFO') as logs,
+            ):
+                runner.execute(self.ws, {'tasks': [task]}, 1, 1, command)
+            (detail,) = seen_at_repair
+            self.assertEqual(support.read_status(self.ws)['statuses']['A'], 'failed')
+            (first,) = detail['reviews']
+            self.assertEqual((first['attempt'], first['approved']), (1, False))
+            self.assertIn('registro esperado ausente', first['feedback'])
+            self.assertEqual(detail['review'], first['feedback'])
+            self.assertTrue(any('motivo da rejeição 1' in line and 'registro esperado' in line for line in logs.output))
+            final = support.read_status(self.ws)['details']['A']['reviews']
+            self.assertEqual([entry['attempt'] for entry in final], [1, 2])

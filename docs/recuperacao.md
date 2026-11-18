@@ -49,6 +49,8 @@ Em `details.<id>`:
 - `integrated_commit` é gravado assim que o worker identifica o commit aplicado, antes dos testes.
 - `revert_commit` identifica o commit que restaurou a árvore, quando a integração exigiu um revert.
 - `error` resume a falha e `review` guarda o último parecer.
+- `reviews` lista cada parecer, com `attempt`, `approved`, `at` e `feedback`, gravado assim que o revisor responde, antes da correção; o motivo de uma rejeição também vai para o `run.log` e aparece no `--watch` enquanto a tarefa não termina.
+- `warning` avisa quando a saída do teste de integração cita caminhos em `.agent-runs/`.
 - `worktree_removed` ou `cleanup_error` registram a limpeza do worktree de uma tarefa aprovada.
 
 O commit integrado leva no assunto o identificador e a descrição da tarefa, e no corpo a execução de origem.
