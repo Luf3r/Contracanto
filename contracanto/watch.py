@@ -202,7 +202,10 @@ def render(report: dict[str, Any], log: str, now: datetime, width: int = 100, co
     if errors:
         lines += ['', p.bold('Erros')]
         for task_id, error in errors:
-            lines.append('  ' + p.paint(task_id, 'failed') + ': ' + _clip(str(error), width - len(task_id) - 4))
+            room = width - len(task_id) - 4
+            # Começo e fim do erro: o que falhou e, no fim da saída, a causa.
+            summary = _clip(maintenance.abbreviate(str(error), room), room)
+            lines.append('  ' + p.paint(task_id, 'failed') + ': ' + summary)
 
     events = [line for line in log.splitlines() if line.strip()][-EVENT_LINES:]
     if events:

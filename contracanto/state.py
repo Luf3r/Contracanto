@@ -330,6 +330,8 @@ class RunContext:
     branch: str | None = None
     # Comando de testes da execução; sem ele, a base não é testada antes da implementação.
     tests: Sequence[str] | None = None
+    # Commit cujas dependências a preparação instalou na raiz, para a integração.
+    root_prepared: str | None = None
     _baselines: dict[str, concurrent.futures.Future] = field(default_factory=dict, repr=False)
     _baseline_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 

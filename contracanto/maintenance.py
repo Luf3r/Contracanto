@@ -85,13 +85,23 @@ def settled(report: dict[str, Any]) -> bool:
     return run.get('state') in state.TERMINAL_STATES or not reservation.get('worker_alive', True)
 
 
+def abbreviate(text: str, limit: int) -> str:
+    """Encurta um erro mantendo a primeira linha, que diz o que falhou, e a cauda, onde a causa costuma estar."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    first = text.splitlines()[0][: limit // 4]
+    marker = '\n[…]\n'
+    return first + marker + text[-(limit - len(first) - len(marker)) :].lstrip()
+
+
 def summarize(report: dict[str, Any]) -> dict[str, Any]:
     """Versão curta do relatório: estados e erros, sem pareceres, tempos por fase nem log."""
     run = report['run'] or {}
     reservation = report['reservation'] or {}
     details = run.get('details') or {}
     errors = {
-        task_id: str(detail['error'])[:SUMMARY_ERROR_LIMIT]
+        task_id: abbreviate(str(detail['error']), SUMMARY_ERROR_LIMIT)
         for task_id, detail in details.items()
         if isinstance(detail, dict) and detail.get('error')
     }

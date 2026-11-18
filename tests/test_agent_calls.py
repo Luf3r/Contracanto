@@ -105,7 +105,7 @@ class SetupCommandTests(support.RepositoryTestCase):
                 seen.append((wt / '.agent-runs' / 'dependency').read_text())
                 return original(prompt, wt, stop)
 
-            code = "import os; os.makedirs('.agent-runs'); open('.agent-runs/dependency', 'w').write('installed')"
+            code = "import os; os.makedirs('.agent-runs', exist_ok=True); open('.agent-runs/dependency', 'w').write('installed')"
             with patch.object(agents, 'run_agy', side_effect=agent):
                 states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, PASS, setup=[sys.executable, '-c', code])
             self.assertEqual(states, {'A': 'approved'})
@@ -191,7 +191,7 @@ class CommitMessageTests(unittest.TestCase):
 class PinnedSetupTests(support.RepositoryTestCase):
     def test_worker_runs_the_pinned_setup_when_none_is_supplied(self):
         with self.repository() as (root, store, base, task, git):
-            code = "import os; os.makedirs('.agent-runs'); open('.agent-runs/dependency', 'w').write('installed')"
+            code = "import os; os.makedirs('.agent-runs', exist_ok=True); open('.agent-runs/dependency', 'w').write('installed')"
             seen = []
             original = agents.run_agy
 

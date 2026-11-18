@@ -186,6 +186,11 @@ def check_tree_scope(task: plan.Task, wt: str | Path, before: str, after: str) -
     check_paths_in_scope(task, paths)
 
 
+def changed_between(wt: str | Path, before: str, after: str) -> list[str]:
+    """Caminhos que diferem entre dois commits."""
+    return git_records('diff', '--name-only', '--no-renames', '-z', before, after, cwd=wt)
+
+
 def check_scope(task: plan.Task, wt: str | Path, base: str) -> None:
     """Cobre alterações não commitadas, inclusive não rastreadas, e commits desde a base."""
     check_paths_in_scope(task, changed_files(wt))
@@ -385,11 +390,15 @@ def run_tests(
     recovery: bool = False,
     expected_branch: str | None = None,
     stop: StopSignal | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
-    """Roda os testes, que devem preservar o commit, a branch (ou o HEAD destacado) e os arquivos."""
+    """Roda os testes, que devem preservar o commit, a branch (ou o HEAD destacado) e os arquivos.
+
+    Serve também a outros comandos sob as mesmas garantias, como a preparação na raiz.
+    """
     expected_branch = check_revision(wt, expected_head, expected_branch, recovery)
     try:
-        result = process.run(command, cwd=wt, timeout=config.TEST_TIMEOUT, check=False, stop=stop)
+        result = process.run(command, cwd=wt, timeout=timeout or config.TEST_TIMEOUT, check=False, stop=stop)
     except RecoveryRequired:
         # Um worktree sujo não pode esconder um encerramento de processos não confirmado.
         raise

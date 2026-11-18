@@ -518,6 +518,79 @@ def registry_hint(output: str) -> str | None:
     )
 
 
+# Manifestos e travas de dependências; uma mudança neles exige preparar a raiz de novo.
+DEPENDENCY_FILES = frozenset(
+    {
+        'package.json',
+        'package-lock.json',
+        'npm-shrinkwrap.json',
+        'yarn.lock',
+        'pnpm-lock.yaml',
+        'pnpm-workspace.yaml',
+        'bun.lockb',
+        'bun.lock',
+        '.npmrc',
+        'requirements.txt',
+        'pyproject.toml',
+        'poetry.lock',
+        'uv.lock',
+        'Pipfile',
+        'Pipfile.lock',
+        'setup.py',
+        'setup.cfg',
+        'Gemfile',
+        'Gemfile.lock',
+        'go.mod',
+        'go.sum',
+        'Cargo.toml',
+        'Cargo.lock',
+        'composer.json',
+        'composer.lock',
+    }
+)
+
+
+def dependency_changes(paths: Sequence[str]) -> list[str]:
+    def is_dependency(path: str) -> bool:
+        name = path.rsplit('/', 1)[-1]
+        return name in DEPENDENCY_FILES or (name.startswith('requirements') and name.endswith('.txt'))
+
+    return [path for path in paths if is_dependency(path)]
+
+
+def prepare_root(ctx: RunContext, task_id: str, head: str, branch: str | None) -> None:
+    """Roda a preparação na raiz antes dos testes de integração, quando ela faz falta.
+
+    A raiz é o checkout de destino, não um worktree preparado: na primeira integração
+    da execução as dependências podem nem estar instaladas, e uma tarefa que muda
+    package.json ou package-lock.json só passa com elas reinstaladas. Depois da primeira
+    vez, a preparação só roda de novo quando um arquivo de dependências mudou desde a
+    última, inclusive por uma integração revertida. Como nos worktrees, ela só pode
+    criar arquivos ignorados pelo Git.
+    """
+    if not ctx.setup:
+        return
+    root = ctx.root
+    if ctx.root_prepared is not None:
+        changed = dependency_changes(gitops.changed_between(root, ctx.root_prepared, head))
+        if not changed:
+            return
+        reason = 'dependências alteradas: ' + ', '.join(changed[:5])
+    else:
+        reason = 'primeira integração da execução'
+    log.info('%s: preparação na raiz (%s)', task_id, reason)
+    result = gitops.run_tests(
+        ctx.setup, root, head, recovery=True, expected_branch=branch, stop=ctx.stop, timeout=config.SETUP_TIMEOUT
+    )
+    ctx.stop.check()
+    if result.returncode:
+        output = (result.stdout + '\n' + result.stderr).strip()[-config.ERROR_TAIL :]
+        raise RuntimeError(
+            f'Preparação na raiz falhou antes dos testes de integração (código {result.returncode}):\n{output}'
+        )
+    ctx.root_prepared = head
+
+
 def integrate(
     ctx: RunContext, artifact: Artifact, base: str, feedback: str, tests: Sequence[str], target: TargetCheckout
 ) -> None:
@@ -550,6 +623,7 @@ def integrate(
     with recovery_on_failure('Escopo do commit integrado não confirmado'):
         gitops.check_tree_scope(task, root, target.head, integrated_head)
     try:
+        prepare_root(ctx, task_id, integrated_head, target.branch)
         integrated = gitops.run_tests(
             tests, root, integrated_head, recovery=True, expected_branch=target.branch, stop=ctx.stop
         )
@@ -559,8 +633,12 @@ def integrate(
             log.warning('%s: %s', task_id, hint)
             run.update_details(task_id, warning=hint)
         if integrated.returncode:
-            output = (integrated.stdout + integrated.stderr)[-config.ERROR_TAIL :]
-            raise RuntimeError('Testes de integração falharam: ' + output + ('\n' + hint if hint else ''))
+            # A causa costuma estar no fim da saída: a cauda vem inteira, depois do cabeçalho.
+            output = (integrated.stdout + '\n' + integrated.stderr).strip()[-config.ERROR_TAIL :]
+            raise RuntimeError(
+                f'Testes de integração falharam (código {integrated.returncode}):\n{output}'
+                + ('\n' + hint if hint else '')
+            )
     except RecoveryRequired:
         raise
     except (Exception, KeyboardInterrupt) as integration_error:
