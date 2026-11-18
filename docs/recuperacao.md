@@ -91,7 +91,9 @@ Tudo fica em `.agent-runs/runs/<run_id>/`:
 | `claim/pid` | PID do worker que assumiu a execução, pela CLI ou pelo MCP |
 | `commands/` | Um arquivo por comando demorado em andamento (`agy`, revisor, testes ou preparação), com o PID do processo raiz no nome |
 | `stop` | Presente quando houve pedido de encerramento |
-| `wt-<id>/` | Worktree de cada tarefa |
+| `wt-<id>/` | Worktree de cada tarefa, só em execuções antigas; as novas usam a pasta abaixo |
+
+Os worktrees ficam fora do repositório, em `<pasta de worktrees>/<repositório>-<hash>/<16 primeiros caracteres do run_id>/wt-<id>/`. A pasta é `CONTRACANTO_WORKTREES_DIR` ou, sem ela, `%LOCALAPPDATA%\Contracanto\worktrees` no Windows e `~/.cache/Contracanto/worktrees` nos demais sistemas. O caminho exato de cada um está em `details.<id>.worktree` do status e em `git worktree list`.
 
 `.agent-runs/latest-run` aponta para a execução mais recente. `get_submitted_plan()` retorna o `plan.json`, inclusive se a preparação falhar; uma execução recusada por reserva ativa não substitui o plano existente.
 

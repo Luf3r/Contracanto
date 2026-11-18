@@ -136,7 +136,7 @@ class RepositoryTestCase(unittest.TestCase):
                 try:
                     yield root, store, base, task, git
                 finally:
-                    for wt in (store / 'runs').glob('*/wt-*'):
+                    for wt in (store / 'worktrees').glob('*/wt-*'):
                         # Preserve no test worktree registrations; dirty fixtures are disposable.
                         git('worktree', 'remove', '--force', str(wt))
 

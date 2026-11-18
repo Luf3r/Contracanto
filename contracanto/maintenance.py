@@ -347,15 +347,19 @@ def _registered_worktrees(root: Path) -> dict[Path, str | None]:
 
 def _remove_run(ws: Workspace, run_id: str, force: bool) -> str | None:
     run_dir = ws.run_dir(run_id).resolve()
+    # Execuções anteriores à mudança guardavam os worktrees dentro do próprio registro.
+    worktree_dir = ws.worktree_dir(run_id).resolve()
     try:
         for worktree, branch in _registered_worktrees(ws.root).items():
-            if worktree.parent == run_dir:
+            if worktree.parent in (run_dir, worktree_dir):
                 gitops.remove_worktree(ws.root, worktree, branch, force)
     except RuntimeError as error:
         lines = str(error).strip().splitlines()
         return f'worktree não removido: {lines[-1] if lines else error}'
     try:
         shutil.rmtree(run_dir)
+        if worktree_dir.exists():
+            shutil.rmtree(worktree_dir)
     except OSError as error:
         return f'diretório não removido: {error}'
 

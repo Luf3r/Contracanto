@@ -100,6 +100,10 @@ AUTO_RESUME = _count('AUTO_RESUME', 1, range(4))
 # Caracteres do patch aceitos em um pedido de revisão; acima disso a tarefa falha em vez de
 # ser revisada pela metade.
 REVIEW_PATCH_LIMIT = _count('REVIEW_PATCH_LIMIT', 400_000, range(1, 10_000_001))
+# Diretório onde ficam os worktrees das tarefas, fora do repositório orquestrado para que
+# ferramentas que varrem a árvore a partir da raiz não enxerguem as cópias. Vazio: a pasta
+# Contracanto/worktrees em %LOCALAPPDATA% no Windows ou em ~/.cache nos demais sistemas.
+WORKTREES_DIR = _text('WORKTREES_DIR', '')
 
 # Comandos fixados pelo operador. Com TEST_COMMAND definido, só esse comando de testes é
 # aceito. Com SETUP_COMMAND definido, a preparação informada precisa ser igual a ele e,
@@ -122,6 +126,7 @@ TUNABLE = (
     'AGENT_RETRIES',
     'AUTO_RESUME',
     'REVIEW_PATCH_LIMIT',
+    'WORKTREES_DIR',
     'TEST_COMMAND',
     'SETUP_COMMAND',
 )

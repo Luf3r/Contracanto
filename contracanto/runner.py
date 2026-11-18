@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -467,6 +468,24 @@ def _persist_integration(ctx: RunContext) -> None:
         raise IntegrationStateError(error) from error
 
 
+REGISTRY_MARKER = re.compile(r'\.agent-runs[\\/]')
+
+
+def registry_hint(output: str) -> str | None:
+    """Aviso quando o teste da integração percorreu o registro de execuções do Contracanto.
+
+    O registro fica dentro do repositório e guarda worktrees de execuções antigas, cópias
+    que um test runner ou linter com globs amplos trata como código do projeto.
+    """
+    if not REGISTRY_MARKER.search(output):
+        return None
+    return (
+        'Aviso: a saída do teste de integração cita caminhos em .agent-runs/, o registro do Contracanto. '
+        'Exclua .agent-runs dos globs do test runner e dos linters, e remova worktrees antigos com '
+        'contracanto --prune-runs.'
+    )
+
+
 def integrate(
     ctx: RunContext, artifact: Artifact, base: str, feedback: str, tests: Sequence[str], target: TargetCheckout
 ) -> None:
@@ -503,9 +522,13 @@ def integrate(
             tests, root, integrated_head, recovery=True, expected_branch=target.branch, stop=ctx.stop
         )
         ctx.stop.check()
+        hint = registry_hint(integrated.stdout + integrated.stderr)
+        if hint:
+            log.warning('%s: %s', task_id, hint)
+            run.update_details(task_id, warning=hint)
         if integrated.returncode:
             output = (integrated.stdout + integrated.stderr)[-config.ERROR_TAIL :]
-            raise RuntimeError('Testes de integração falharam: ' + output)
+            raise RuntimeError('Testes de integração falharam: ' + output + ('\n' + hint if hint else ''))
     except RecoveryRequired:
         raise
     except (Exception, KeyboardInterrupt) as integration_error:

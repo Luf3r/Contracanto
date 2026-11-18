@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from . import config
 from .errors import RecoveryRequired, RunCancelled
 
 RunStatus = Literal['starting', 'running', 'completed', 'failed', 'cancelled']
@@ -38,15 +39,28 @@ def now() -> str:
 
 @dataclass(frozen=True)
 class Workspace:
-    """Repositório orquestrado e o diretório onde as execuções são registradas."""
+    """Repositório orquestrado, o diretório onde as execuções são registradas e o dos worktrees.
+
+    Sem `worktrees`, os worktrees ficam em `store/worktrees`; `for_root` os põe fora do
+    repositório, em worktrees_parent().
+    """
 
     root: Path
     store: Path
+    worktrees: Path | None = None
 
     @classmethod
     def for_root(cls, root: Path) -> Workspace:
         root = Path(root).resolve()
-        return cls(root, root / '.agent-runs')
+        # Um nome por repositório: o do diretório, para reconhecer, e um hash do caminho, para
+        # separar repositórios com o mesmo nome.
+        key = str(root).casefold() if os.name == 'nt' else str(root)
+        digest = hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]
+        return cls(root, root / '.agent-runs', worktrees_parent() / f'{root.name}-{digest}')
+
+    def worktree_dir(self, run_id: str) -> Path:
+        """Diretório dos worktrees de uma execução; o prefixo do id mantém o caminho curto."""
+        return (self.worktrees if self.worktrees is not None else self.store / 'worktrees') / run_id[:16]
 
     @property
     def lock(self) -> Path:
@@ -123,6 +137,17 @@ class Workspace:
 
 
 REPO_ENV = 'CONTRACANTO_REPO'
+
+
+def worktrees_parent() -> Path:
+    """Onde ficam os worktrees de todos os repositórios: CONTRACANTO_WORKTREES_DIR ou o cache local."""
+    if config.WORKTREES_DIR:
+        return Path(config.WORKTREES_DIR).expanduser().resolve()
+    if os.name == 'nt':
+        base = Path(os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local')
+    else:
+        base = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache')
+    return (base / 'Contracanto' / 'worktrees').resolve()
 
 
 def default_workspace(repo: str | Path | None = None) -> Workspace:

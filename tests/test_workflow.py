@@ -95,7 +95,7 @@ class WorkflowTests(unittest.TestCase):
             for name in ('ação espaço.txt', 'B.txt', 'C.txt'):
                 self.assertEqual((root / name).read_text(), 'ok\n')
             self.assertEqual(git('status', '--porcelain').stdout, '')
-            for wt in (store / 'runs').glob('*/wt-*'):
+            for wt in (store / 'worktrees').glob('*/wt-*'):
                 git('worktree', 'remove', str(wt))
             if goal is not None:
                 self.assertEqual({stage for stage, _ in prompts}, {'implementation', 'review', 'repair'})

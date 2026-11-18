@@ -151,10 +151,13 @@ def run_agy(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
 
 
 def make_worktree(ctx: RunContext, task: Task, base: str) -> Path:
-    location = ctx.run_dir / f'wt-{task["id"]}'
+    # Fora do repositório: ferramentas que varrem a árvore a partir da raiz, como test runners
+    # e linters com globs amplos, não podem enxergar as cópias das outras tarefas.
+    location = ctx.ws.worktree_dir(ctx.run_id) / f'wt-{task["id"]}'
     if location.exists():
         raise RuntimeError(f'Worktree já existe: {location}; verifique antes de limpar')
     branch = f'agent/{task["id"]}-{uuid.uuid4().hex[:12]}'
+    location.parent.mkdir(parents=True, exist_ok=True)
     gitops.git('worktree', 'add', '-b', branch, str(location), base, cwd=ctx.root)
     return location
 

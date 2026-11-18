@@ -36,7 +36,7 @@ agy --version
 A instalação cria os comandos `contracanto` (CLI) e `contracanto-mcp` (servidor MCP).
 
 2. Escolha o repositório a orquestrar com `--repo CAMINHO_DO_PROJETO` na CLI ou com a variável `CONTRACANTO_REPO` no ambiente do servidor MCP; sem eles, vale o diretório atual. O caminho precisa ser **a raiz** de um repositório Git, com uma branch em uso (HEAD destacado é recusado, salvo com `--branch`) e sem alterações pendentes. Um subdiretório do repositório é recusado.
-3. O estado das execuções fica em `.agent-runs/` dentro desse repositório, que precisa ignorar o diretório para continuar limpo: acrescente `.agent-runs/` ao `.gitignore` ou a `.git/info/exclude`.
+3. O estado das execuções fica em `.agent-runs/` dentro desse repositório, que precisa ignorar o diretório para continuar limpo: acrescente `.agent-runs/` ao `.gitignore` ou a `.git/info/exclude`. Os worktrees das tarefas ficam fora do repositório, em `%LOCALAPPDATA%\Contracanto\worktrees\<repositório>-<hash>\` no Windows e em `~/.cache/Contracanto/worktrees/` (ou sob `$XDG_CACHE_HOME`) nos demais sistemas, para que test runners, linters e `tsc` com globs amplos não enxerguem as cópias. `CONTRACANTO_WORKTREES_DIR` escolhe outra pasta. Se a saída do teste de integração citar caminhos em `.agent-runs/`, por exemplo worktrees de execuções anteriores a essa mudança, o erro da tarefa e o campo `warning` do status avisam; exclua o diretório dos globs e limpe os registros antigos com `--prune-runs`.
 4. O executor e todas as correções passam explicitamente `--mode auto --sandbox` ao Antigravity, sem `--dangerously-skip-permissions`. Configure uma allowlist limitada no CLI antes de operar. Comandos negados devem ser autorizados de forma granular; não desative o sandbox para contornar a falha. O modo headless pode negar comandos não autorizados. Configure permissões granulares conforme docs: https://antigravity.google/docs/cli/headless/
 
 Sem instalar, `python -m contracanto` e `python -m contracanto.server` equivalem a `contracanto` e `contracanto-mcp`, desde que o diretório desta cópia esteja no `PYTHONPATH`. Para desenvolver o próprio Contracanto, instale-o no venv dele com `python -m pip install -e ".[dev]"`.
@@ -93,6 +93,7 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_AGENT_MODEL` | sem valor | Modelo do executor, passado ao `agy` em `--model` (ids em `agy models`, por exemplo `gemini-4-hydrogen-high`); sem valor, vale o padrão do `agy` |
 | `CONTRACANTO_AGENT_RETRIES` | 1 | Novas chamadas ao `agy` quando uma implementação ou correção falha (0 a 3) |
 | `CONTRACANTO_AUTO_RESUME` | 1 | Vezes que `wait_for_run` relança sozinho uma execução cujo worker morreu (0 a 3; 0 desliga) |
+| `CONTRACANTO_WORKTREES_DIR` | cache local | Pasta onde ficam os worktrees das tarefas, separada por repositório; mantenha-a fora do repositório orquestrado |
 | `CONTRACANTO_REVIEW_PATCH_LIMIT` | 400000 | Tamanho máximo do patch enviado ao revisor, em caracteres |
 | `CONTRACANTO_TEST_COMMAND` | sem valor | Lista JSON de argumentos. Fixa o comando de testes: um comando diferente é recusado |
 | `CONTRACANTO_SETUP_COMMAND` | sem valor | Lista JSON de argumentos. Fixa o comando de preparação: um diferente é recusado e, sem nenhum informado, ele é usado; `[]` proíbe qualquer preparação |
