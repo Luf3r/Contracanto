@@ -123,7 +123,6 @@ def execute(
                 },
             )
     ctx = RunContext.open(ws, run_id, keep_worktrees, setup, branch)
-    ctx.tests = tests
     run = ctx.state
     keep_lock = False
     try:
@@ -168,6 +167,9 @@ def _execute(
     if not shutil.which('agy') or not shutil.which('claude'):
         raise RuntimeError('Instale/autentique agy e claude; ambos devem estar no PATH')
     tests = resolve_command(tests, ctx.root, 'Comando de testes')
+    # O teste da base roda o mesmo comando resolvido que a revisão e a integração; o cru
+    # falha no Windows quando é um script .cmd, como npm.
+    ctx.tests = tests
     if ctx.setup:
         ctx.setup = resolve_command(ctx.setup, ctx.root, 'Comando de preparação')
     origin = check_repository(ctx.root, ctx.branch)

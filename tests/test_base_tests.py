@@ -102,3 +102,25 @@ class VerdictTests(support.RepositoryTestCase):
     def test_reviewer_is_told_which_command_ran(self):
         self.assertIn('test_command', agents.REVIEW_PROMPT)
         self.assertIn('inherited', agents.REVIEW_PROMPT)
+
+
+class ResolvedCommandTests(support.RepositoryTestCase):
+    def test_base_tests_use_the_resolved_command(self):
+        # No Windows, `npm` só roda pelo caminho do npm.cmd que resolve_command encontra;
+        # aqui um nome que só existe depois da resolução faz o mesmo papel.
+        raw = ['verificacao-sem-caminho']
+        original = runner.resolve_command
+
+        def resolve(command, root, label):
+            return list(PASS) if list(command) == raw else original(command, root, label)
+
+        with self.repository() as (root, store, base, task, git):
+            with (
+                patch.object(runner, 'resolve_command', side_effect=resolve),
+                patch.object(gitops, 'run_tests', wraps=gitops.run_tests) as tests,
+            ):
+                states = runner.execute(self.ws, {'tasks': [task]}, 1, 0, raw)
+            self.assertEqual(states, {'A': 'approved'}, support.read_status(self.ws)['details'])
+            commands = [list(call.args[0]) for call in tests.call_args_list]
+            self.assertEqual(len(commands), 3)  # base, worktree e integração
+            self.assertTrue(all(command == PASS for command in commands), commands)
