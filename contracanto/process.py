@@ -152,6 +152,42 @@ else:
         return True
 
 
+def launch_detached(argv: Sequence[str], popen: Any = None, **options: Any) -> tuple[subprocess.Popen, bool]:
+    """Lança um worker que sobrevive ao processo que o lançou.
+
+    Devolve o processo e se ele ficou fora do Job Object do lançador. No Windows, o cliente
+    MCP costuma pôr o servidor num job que encerra os descendentes quando o servidor é
+    substituído; o worker pede para sair dele com CREATE_BREAKAWAY_FROM_JOB. Um job que não
+    permite a saída recusa a criação com acesso negado, e então o worker é lançado dentro
+    dele, como antes, com o retorno False para que quem lançou possa avisar. `popen` substitui
+    subprocess.Popen, para quem lança simular o worker.
+    """
+    popen = popen or subprocess.Popen
+    flags = detached_options()
+    if sys.platform != 'win32':
+        return popen(argv, **flags, **options), True
+    breakaway = flags['creationflags'] | subprocess.CREATE_BREAKAWAY_FROM_JOB
+    try:
+        return popen(argv, creationflags=breakaway, **options), True
+    except PermissionError:
+        process = popen(argv, **flags, **options)
+        return process, not _in_job(process)
+
+
+def _in_job(process: subprocess.Popen) -> bool:
+    """Se o processo pertence a algum Job Object; na dúvida, responde que sim."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    result = wintypes.BOOL()
+    handle = wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
+    if not kernel.IsProcessInJob(handle, None, ctypes.byref(result)):
+        return True
+    return bool(result.value)
+
+
 def _register(stop: StopSignal | None, pid: int) -> Path | None:
     """Registra um comando interrompível em andamento; é diagnóstico, nunca impede o comando."""
     if stop is None or stop.commands is None:

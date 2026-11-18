@@ -168,14 +168,14 @@ def _launch(
         argv = worker_argv(ws, run_id, token, parallel, retries, keep_worktrees, test, setup, branch.strip() or None)
         run.save()
         with ws.log(run_id).open('w', encoding='utf-8') as log:
-            proc = subprocess.Popen(
+            proc, outside_job = process.launch_detached(
                 argv,
+                subprocess.Popen,
                 cwd=str(ws.root),
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 env=worker_env(),
-                **process.detached_options(),
             )
     except Exception as error:
         try:
@@ -190,6 +190,12 @@ def _launch(
         f'Execução {run_id} iniciada com PID {proc.pid}. Acompanhe com wait_for_run ou get_run_status. '
         'O início não representa aprovação das tarefas.'
     )
+    if not outside_job:
+        message += (
+            '\nAviso: o cliente MCP não permite que o worker saia do Job Object do servidor. '
+            'Se o servidor MCP for encerrado ou substituído, o worker e os agentes morrem junto; '
+            'wait_for_run relança as tarefas que faltarem.'
+        )
     try:
         ws.pid(run_id).write_text(str(proc.pid), encoding='utf-8')
     except OSError as error:

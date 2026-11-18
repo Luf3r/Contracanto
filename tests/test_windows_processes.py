@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import os
+import site
 import subprocess
 import sys
 import time
@@ -166,3 +167,85 @@ class WindowsProcessTests(unittest.TestCase):
             time.sleep(2.1)
             self.assertEqual(result.returncode, 0)
             self.assertFalse(marker.exists())
+
+
+# Roda no interpretador base, sem o lançador do venv, que cria um job próprio e confundiria
+# o teste; os pacotes do venv entram por addsitedir, que também processa os .pth do pywin32.
+DETACHED_PARENT = r"""
+import site, subprocess, sys
+for directory in {sites!r}:
+    site.addsitedir(directory)
+sys.path.insert(0, {root!r})
+from contracanto import process
+child, outside = process.launch_detached(
+    [sys.executable, '-c', 'import time; time.sleep(60)'],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+print(child.pid, outside, flush=True)
+"""
+
+
+@unittest.skipUnless(os.name == 'nt', 'Windows Job Objects')
+class DetachedWorkerJobTests(unittest.TestCase):
+    """O worker do MCP precisa sobreviver ao job que o cliente aplica ao servidor."""
+
+    def launch_from_job(self, allow_breakaway):
+        """Lança um worker de dentro de um job que encerra tudo ao fechar; devolve PID e saída do job."""
+        from contracanto import windows_job as w
+
+        root = str(Path(__file__).resolve().parent.parent)
+        code = DETACHED_PARENT.format(root=root, sites=site.getsitepackages())
+        with w.WindowsJob() as job:
+            if allow_breakaway:
+                kind = w.win32job.JobObjectExtendedLimitInformation
+                limits = w.win32job.QueryInformationJobObject(job.handle, kind)
+                limits['BasicLimitInformation']['LimitFlags'] |= w.win32job.JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                w.win32job.SetInformationJobObject(job.handle, kind, limits)
+            parent = subprocess.Popen(
+                [getattr(sys, '_base_executable', sys.executable), '-I', '-c', code],
+                stdout=subprocess.PIPE,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW | w.WindowsJob.creationflags,
+            )
+            job.start(parent.pid)
+            output, _ = parent.communicate(timeout=60)
+            self.assertEqual(parent.returncode, 0, output)
+        pid, outside = output.split()
+        self.addCleanup(self.kill, int(pid))
+        return int(pid), outside == 'True'
+
+    def kill(self, pid):
+        import pywintypes
+        import win32api
+        import win32con
+
+        try:
+            handle = win32api.OpenProcess(win32con.PROCESS_TERMINATE, False, pid)
+        except pywintypes.error:
+            return
+        try:
+            win32api.TerminateProcess(handle, 1)
+        except pywintypes.error:
+            pass
+        finally:
+            handle.Close()
+
+    def alive_after_job_closes(self, pid):
+        # O fechamento do job encerra os processos de forma assíncrona.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not proc.pid_alive(pid):
+                return False
+            time.sleep(0.1)
+        return True
+
+    def test_worker_leaves_a_job_that_allows_it(self):
+        pid, outside = self.launch_from_job(allow_breakaway=True)
+        if not outside:
+            self.skipTest('o ambiente que roda os testes está num job que não permite a saída')
+        self.assertTrue(self.alive_after_job_closes(pid))
+
+    def test_job_that_forbids_leaving_still_gets_a_worker_and_a_warning(self):
+        pid, outside = self.launch_from_job(allow_breakaway=False)
+        self.assertFalse(outside)
+        self.assertFalse(self.alive_after_job_closes(pid))
