@@ -241,6 +241,7 @@ Para liberar um único worktree, use `git worktree remove "CAMINHO_EXATO"`. O Gi
 | `O operador fixou o comando` | Use o comando mostrado no erro, definido em `CONTRACANTO_TEST_COMMAND` ou `CONTRACANTO_SETUP_COMMAND` |
 | `Não encontrado no PATH: agy` (ou `claude`) | O PATH do processo MCP; depois de instalar, reinicie o app |
 | `Modelo do executor '…' não está em agy models` | `CONTRACANTO_AGENT_MODEL` e a lista de `agy models` |
+| `CreateProcessWithLogonW failed: 267` no stderr do codex | Worktrees em `%LOCALAPPDATA%` com o servidor aberto pelo app Claude; defina `CONTRACANTO_WORKTREES_DIR` fora de `AppData\Local` (veja Executor Codex no README) |
 | `ficou …s sem progresso` | O executor travou ou só leu arquivos; aumente `CONTRACANTO_AGENT_IDLE_TIMEOUT` se a tarefa exige uma leitura longa antes de escrever |
 | `Comando de testes não encontrado` ou `Comando de preparação não encontrado` | O nome do executável e o PATH do worker |
 | Nenhum estado gerado | O log do MCP; falhas antes do primeiro estado aparecem ali |

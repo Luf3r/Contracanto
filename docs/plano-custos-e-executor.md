@@ -190,6 +190,7 @@ A F1 precisa normalizar os três para um formato único: `input` sem cache, `cac
 - **Tokens do Codex:** `usage.from_codex` soma os turnos. O modelo vem de `CONTRACANTO_AGENT_MODEL`, e não há pico por pedido, então o contexto longo não é detectado.
 - **Compactação antes de 272 mil tokens:** não foi configurada. A chave do Codex não foi verificada, e `--ignore-user-config` ignoraria uma configuração do usuário.
 - **Pré-checagem:** procura `CONTRACANTO_CODEX_PATH` e não consulta `agy models` com o Codex.
+- **Smoke real:** `approved`, com tokens no `status.json`. Na primeira tentativa, os comandos de shell do Codex falharam com `CreateProcessWithLogonW failed: 267`, porque o app Claude (MSIX) redireciona `%LOCALAPPDATA%`, onde ficam os worktrees por padrão, para a pasta do pacote, que o usuário do sandbox não alcança. Com `CONTRACANTO_WORKTREES_DIR` fora de `AppData\Local`, os comandos rodaram. O custo do executor ficou sem preço porque `CONTRACANTO_PRICES_JSON` não estava definido.
 
 ## F6: regras para o arquiteto dimensionar tarefas
 
