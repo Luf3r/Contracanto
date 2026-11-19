@@ -55,7 +55,7 @@ O pedido vai pela entrada padrão.
 - **Configuração do usuário fica de fora.** `--ignore-user-config` deixa de fora plugins, skills e hooks do `~/.codex`, que numa medição quase dobraram o contexto da primeira chamada (de 64 mil para 118 mil tokens). O login continua valendo. A política de aprovação e, no Windows, o sandbox `elevated` vêm explícitos: sem o primeiro, todo comando do agente é recusado; sem o segundo, o worktree fica só para leitura.
 - **Sandbox `workspace-write`:** a rede fica bloqueada, e a escrita só é permitida no worktree e na pasta temporária (`%TEMP%`) do usuário.
 - **Worktrees fora de `%LOCALAPPDATA%`:** o app Claude é um pacote MSIX, e o que os processos abertos por ele gravam em `%LOCALAPPDATA%` vai para a pasta do pacote (`AppData\Local\Packages\Claude_…\LocalCache`). O usuário do sandbox do Codex não chega lá, e todo comando de shell falharia com `CreateProcessWithLogonW failed: 267`. Por isso o padrão dos worktrees é `~/.cache/Contracanto/worktrees`; se definir `CONTRACANTO_WORKTREES_DIR`, mantenha a pasta fora de `AppData\Local`.
-- **Instruções do projeto:** o Codex lê o `AGENTS.md` do worktree, e o pedido de implementação manda ler `AGENTS.md` e `GEMINI.md` quando existirem.
+- **Instruções do projeto:** o Codex lê o `AGENTS.md` do worktree por conta própria. O guia do executor, que vai em todo pedido, manda ler `AGENTS.md`, `CLAUDE.md` e `GEMINI.md` quando existirem.
 - **Tokens e modelo:** os tokens vêm dos eventos `turn.completed`. O Codex não informa o modelo nem cada pedido ao modelo, então o modelo registrado é o de `CONTRACANTO_AGENT_MODEL`, e uma chamada acima do limite de contexto longo não é detectada.
 - **Cobrança:** com o login do ChatGPT, o uso sai do limite do plano. Deixe `CONTRACANTO_EXECUTOR_BILLING` em `plan` e use `api` só com login por chave de API.
 
@@ -262,6 +262,7 @@ Instalado, o pacote oferece os comandos `contracanto` e `contracanto-mcp`. `exam
 | `gitops.py` | Consultas e verificações Git: limpeza, escopo, branch e HEAD |
 | `agents.py` | Chamadas ao executor, `agy` ou `codex` (implementação e correção), e ao `claude` (revisão) |
 | `architect.md` | Guia do arquiteto, entregue pelas instruções do servidor e pela ferramenta `planning_guide` e importado pelo `CLAUDE.md` |
+| `executor.md` | Guia do executor, colocado em todo pedido de implementação e de correção e importado pelo `GEMINI.md`: escopo, o que fazer quando o plano não fecha, o que não fazer para os testes passarem, verificação e formato do relatório |
 | `runner.py` | Ciclo da execução: lotes, revisão, integração e rollback |
 | `maintenance.py` | Consulta de status, destravamento da reserva, retomada e poda de execuções |
 | `server.py` | Ferramentas MCP e lançamento do worker |

@@ -123,7 +123,7 @@ class OperationalTests(unittest.TestCase):
         def command(args, **kw):
             if args[0] == 'claude':
                 self.assertLess(len(subprocess.list2cmdline(args)), 2000)
-                self.assertIn(patch_text, json.loads(kw['input_data'].split('\n', 1)[1])['patch'])
+                self.assertIn(patch_text, json.loads(kw['input_data'].rsplit('\n', 1)[1])['patch'])
                 return subprocess.CompletedProcess(args, 0, json.dumps(dict(result='{"verdict": "APPROVED"}')), '')
             return subprocess.CompletedProcess(args, 0, '', '')
 

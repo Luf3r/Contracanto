@@ -4,7 +4,7 @@ Você planeja e revisa; o executor implementa (o Gemini pelo `agy` ou, com `CONT
 
 ## O que cada agente vê
 
-- **Executor:** a tarefa (`id`, `description`, `deps`, `files`, `acceptance`), o `goal` do plano e o commit da base. Nada das outras tarefas, nem os relatórios das dependências. Trabalha num worktree novo, criado sobre o que já foi integrado, e lê o `AGENTS.md` do repositório. Não pode alterar arquivo fora de `files`. Com o Codex, não tem rede.
+- **Executor:** a tarefa (`id`, `description`, `deps`, `files`, `acceptance`), o `goal` do plano, o commit da base, o comando de testes e o guia do executor (`contracanto/executor.md`). Nada das outras tarefas, nem os relatórios das dependências. O guia manda parar e explicar em "Bloqueio" quando a tarefa exige arquivo fora de `files`, a menos que a descrição autorize uma alternativa, e proíbe apagar ou afrouxar testes, baixar limites e acrescentar dependências. Trabalha num worktree novo, criado sobre o que já foi integrado, e lê o `AGENTS.md` do repositório. Não pode alterar arquivo fora de `files`. Com o Codex, não tem rede.
 - **Revisor:** a tarefa, o diff, o relatório do executor e a saída do comando de testes, rodado no worktree. Não lê o repositório. Rejeita critério que o comando de testes não comprova (`criteria_unverifiable`).
 - **Integração:** aplica um commit por tarefa, em série, e roda o comando de testes de novo na raiz. Se falhar, reverte (`integration_tests`).
 - **Base:** antes de cada lote, o comando roda na base. Se ela já falha, só uma tarefa que a conserte pode ser aprovada.

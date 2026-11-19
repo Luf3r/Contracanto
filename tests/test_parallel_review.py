@@ -20,7 +20,7 @@ class ParallelReviewTests(support.RepositoryTestCase):
             original_integrate = runner.integrate
 
             def agent(prompt, wt, stop=None):
-                data = json.loads(prompt.split('\n', 1)[1])
+                data = json.loads(prompt.rsplit('\n', 1)[1])
                 (wt / data['task']['files'][0]).write_text(data['task']['id'])
                 return 'done'
 
@@ -50,7 +50,7 @@ class ParallelReviewTests(support.RepositoryTestCase):
             tasks = [dict(task, id=tid, files=[f'{tid}.txt']) for tid in ('A', 'B')]
 
             def agent(prompt, wt, stop=None):
-                data = json.loads(prompt.split('\n', 1)[1])
+                data = json.loads(prompt.rsplit('\n', 1)[1])
                 (wt / data['task']['files'][0]).write_text('x')
                 return 'done'
 

@@ -29,7 +29,7 @@ class RootSetupTests(support.RepositoryTestCase):
         ]
 
         def agent(prompt, wt, stop=None):
-            task_id = json.loads(prompt.split('\n', 1)[1])['task']['id']
+            task_id = json.loads(prompt.rsplit('\n', 1)[1])['task']['id']
             (wt / files[task_id]).write_text(f'{task_id}\n')
             return 'done'
 

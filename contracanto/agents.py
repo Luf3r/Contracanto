@@ -23,19 +23,16 @@ from .state import RunContext, StopSignal
 
 log = logging.getLogger('contracanto')
 
+# Guia do executor, igual para o agy e o Codex e para qualquer repositório: vai em todo
+# pedido de implementação e de correção, em vez de depender de arquivos do projeto.
+EXECUTOR_GUIDE = Path(__file__).with_name('executor.md').read_text(encoding='utf-8')
 IMPLEMENT_PROMPT = (
-    'Você está implementando UMA tarefa no Git worktree atual. '
-    'Leia AGENTS.md e GEMINI.md quando presentes. Preserve a branch atual. '
-    'Não altere a arquitetura além do que a tarefa pede. Não faça commit/push/deploy. '
-    'Não acesse segredos. NÃO altere arquivos fora da lista files. '
-    'Se houver conflito de escopo, reporte sem implementar. '
-    'Se o pedido trouxer base_tests, os testes já falham antes da sua alteração: corrija essas '
-    'falhas quando a tarefa pedir ou quando os critérios dependerem delas, e cite-as no relatório; '
-    'a tarefa só é aprovada com os testes passando.\n'
+    EXECUTOR_GUIDE + '\n## Pedido\n\nImplemente a tarefa do JSON abaixo seguindo este guia. O JSON traz a tarefa, o '
+    'contexto do plano, o comando de testes (`test_command`) e, quando a base já falha, `base_tests`.\n'
 )
 REPAIR_PROMPT = (
-    'Corrija a tarefa abaixo considerando a revisão. Preserve a branch atual. '
-    'Não faça commit/push/deploy. Não modifique arquivos fora de files.\n'
+    EXECUTOR_GUIDE + '\n## Pedido\n\nCorrija a tarefa do JSON abaixo considerando a revisão (`review`), seguindo a '
+    'seção "Correção depois da revisão" deste guia.\n'
 )
 REVIEW_PROMPT = (
     'Você é revisor de código. Verifique a task e o diff contra critérios de aceitação. '
@@ -157,6 +154,11 @@ class Artifact:
         if self.commit is None:
             raise RuntimeError(f'Tarefa {self.task["id"]} sem commit candidato')
         return self.commit
+
+
+def _test_command(ctx: RunContext) -> dict[str, list[str]]:
+    """O comando que o revisor e a integração vão rodar, para o executor rodar o mesmo."""
+    return {'test_command': list(ctx.tests)} if ctx.tests else {}
 
 
 def _with_payload(instructions: str, payload: dict) -> str:
@@ -478,7 +480,7 @@ def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifa
     prepare_worktree(ctx, wt, base, branch)
     baseline = base_tests(ctx, wt, base, branch)
     failure = baseline if baseline is not None and baseline.returncode else None
-    payload: dict[str, Any] = {'task': task, 'context': context}
+    payload: dict[str, Any] = {'task': task, 'context': context, **_test_command(ctx)}
     if failure is not None:
         payload['base_tests'] = {'exit_code': failure.returncode, 'output': failure.output}
     prompt = _with_payload(IMPLEMENT_PROMPT, payload)
@@ -507,7 +509,7 @@ def repair(ctx: RunContext, artifact: Artifact, base: str, context: str, feedbac
     """Pede a correção e substitui o candidato por um único commit sobre a base."""
     task = artifact.task
     wt = Path(artifact.worktree)
-    payload = {'task': task, 'context': context, 'review': feedback}
+    payload = {'task': task, 'context': context, **_test_command(ctx), 'review': feedback}
     prompt = _with_payload(REPAIR_PROMPT, payload)
     correction = call_agent(ctx, task, prompt, wt, artifact.candidate, artifact.branch)
     artifact.report += '\nCorreção: ' + correction

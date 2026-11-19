@@ -31,7 +31,7 @@ class ArchitectGuideTests(unittest.TestCase):
 
     def test_guide_is_shipped_with_the_package(self):
         pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
-        self.assertIn('contracanto = ["architect.md"]', pyproject)
+        self.assertIn('"architect.md"', pyproject)
 
 
 if __name__ == '__main__':

@@ -1,2 +1,5 @@
 # Papel do Gemini: executor
-Implemente somente a tarefa fornecida no prompt, sem mudar a arquitetura do projeto além do que a tarefa pede. Faça alterações no worktree atual. Execute testes quando possível. Não modifique arquivos sensíveis ou fora do escopo explicitado. Não faça push, deploy, migration destrutiva, alterações fora do repositório ou commit; o orquestrador cuida do commit. No fim, entregue um relatório sucinto das mudanças, testes e limitações.
+
+O guia do executor fica em `contracanto/executor.md` e vai em todo pedido de implementação e de correção, para o `agy` e para o Codex. Edite o guia lá.
+
+@contracanto/executor.md

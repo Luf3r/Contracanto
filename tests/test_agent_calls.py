@@ -77,7 +77,7 @@ class RepairRetryTests(support.RepositoryTestCase):
             calls = []
 
             def agent(prompt, wt, stop=None):
-                calls.append(prompt.split('\n', 1)[0][:9])
+                calls.append('review' in json.loads(prompt.rsplit('\n', 1)[1]))
                 if len(calls) == 2:
                     raise RuntimeError('agy exited 1: falha passageira')
                 (wt / 'allowed.txt').write_text(str(len(calls)))

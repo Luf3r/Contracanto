@@ -66,7 +66,7 @@ class BrokenBaseTests(support.RepositoryTestCase):
         with self.repository() as (root, store, base, task, git):
 
             def agent(prompt, wt, stop=None):
-                task_id = json.loads(prompt.split('\n', 1)[1])['task']['id']
+                task_id = json.loads(prompt.rsplit('\n', 1)[1])['task']['id']
                 (wt / f'{task_id}.txt').write_text('ok')
                 return 'done'
 

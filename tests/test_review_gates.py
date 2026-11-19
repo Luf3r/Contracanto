@@ -24,7 +24,7 @@ class ReviewGateTests(support.RepositoryTestCase):
 
             def command(args, **kwargs):
                 if args[0] == 'claude':
-                    payload.update(json.loads(kwargs['input_data'].split('\n', 1)[1]))
+                    payload.update(json.loads(kwargs['input_data'].rsplit('\n', 1)[1]))
                 return original_cmd(args, **kwargs)
 
             with patch.object(proc, 'run', side_effect=command):
@@ -52,7 +52,7 @@ class ReviewGateTests(support.RepositoryTestCase):
 
             def command(args, **kwargs):
                 if args[0] == 'claude':
-                    patches.append(json.loads(kwargs['input_data'].split('\n', 1)[1])['patch'])
+                    patches.append(json.loads(kwargs['input_data'].rsplit('\n', 1)[1])['patch'])
                 return original_cmd(args, **kwargs)
 
             with patch.object(proc, 'run', side_effect=command):
@@ -70,7 +70,7 @@ class ReviewGateTests(support.RepositoryTestCase):
             repairs = []
 
             def capture_repair(prompt, wt, stop=None):
-                request = json.loads(prompt.split('\n', 1)[1])
+                request = json.loads(prompt.rsplit('\n', 1)[1])
                 if 'review' in request:
                     repairs.append(request['review'])
                 return agent(prompt, wt)
@@ -95,7 +95,7 @@ class ReviewGateTests(support.RepositoryTestCase):
             seen_at_repair = []
 
             def capture_repair(prompt, wt, stop=None):
-                if 'review' in json.loads(prompt.split('\n', 1)[1]):
+                if 'review' in json.loads(prompt.rsplit('\n', 1)[1]):
                     # O estado gravado no disco, como get_run_status e o --watch o leem.
                     seen_at_repair.append(support.read_status(self.ws)['details']['A'])
                 return agent(prompt, wt)

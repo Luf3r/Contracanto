@@ -31,7 +31,7 @@ class ResumeTests(support.RepositoryTestCase):
         failed: list[str] = []
 
         def agent(prompt, wt, stop=None):
-            name = json.loads(prompt.split('\n', 1)[1])['task']['files'][0]
+            name = json.loads(prompt.rsplit('\n', 1)[1])['task']['files'][0]
             if name == failing_file and not failed:
                 failed.append(name)
                 raise RuntimeError('falha passageira')

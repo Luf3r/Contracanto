@@ -21,7 +21,7 @@ if engine == 'claude':
     print(json.dumps({'result':json.dumps({'verdict':'APPROVED'})}))
 else:
     prompt=json.loads(text)['message']['content']
-    data=json.loads(prompt.split('\\n',1)[1])
+    data=json.loads(prompt.rsplit('\\n',1)[1])
     task=data['task']
     content='bad\\n' if task['id']=='A' and 'review' not in data else 'ok\\n'
     Path(task['files'][0]).write_text(content,encoding='utf-8')
@@ -58,7 +58,7 @@ class WorkflowTests(unittest.TestCase):
                     prompt = kwargs['input_data']
                     if args[0] == 'agy':
                         prompt = json.loads(prompt)['message']['content']
-                    data = json.loads(prompt.split('\n', 1)[1])
+                    data = json.loads(prompt.rsplit('\n', 1)[1])
                     stage = 'review' if args[0] == 'claude' else ('repair' if 'review' in data else 'implementation')
                     prompts.append((stage, data))
                     if args[0] == 'agy':

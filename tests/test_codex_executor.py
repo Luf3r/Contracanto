@@ -179,7 +179,7 @@ class RunTests(support.RepositoryTestCase):
         calls = []
 
         def agent(prompt, wt, stop=None):
-            calls.append(prompt.split('\n', 1)[0])
+            calls.append(prompt)
             (wt / 'allowed.txt').write_text('ok')
             return 'done'
 
