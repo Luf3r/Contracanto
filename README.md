@@ -47,7 +47,7 @@ Com `CONTRACANTO_EXECUTOR=codex`, o Codex CLI implementa e corrige no lugar do `
 
 ```text
 codex exec --json --sandbox workspace-write --ephemeral --ignore-user-config
-  -c approval_policy="never" [-c windows.sandbox="elevated"] [--model <modelo>] -C <worktree> -
+  -c approval_policy="never" [-c windows.sandbox="elevated"] [--model <modelo>] [-c model_reasoning_effort="<esforço>"] -C <worktree> -
 ```
 
 O pedido vai pela entrada padrão.
@@ -64,7 +64,8 @@ Exemplo de `env` no `.mcp.json`, com o caminho do executável no lugar de `<cami
 ```json
 "CONTRACANTO_EXECUTOR": "codex",
 "CONTRACANTO_CODEX_PATH": "<caminho>/codex.exe",
-"CONTRACANTO_AGENT_MODEL": "gpt-6-luna"
+"CONTRACANTO_AGENT_MODEL": "gpt-6-luna",
+"CONTRACANTO_AGENT_EFFORT": "high"
 ```
 
 ## Teste sem MCP
@@ -120,6 +121,7 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_EXECUTOR` | `agy` | CLI que implementa e corrige: `agy` (Antigravity) ou `codex` (Codex CLI); veja [Executor Codex](#executor-codex) |
 | `CONTRACANTO_CODEX_PATH` | `codex` | Executável do Codex; prefira o caminho completo, porque o servidor MCP herda o PATH de quando o app foi aberto |
 | `CONTRACANTO_AGENT_MODEL` | sem valor | Modelo do executor, passado em `--model` (no `agy`, ids em `agy models`, por exemplo `gemini-4-hydrogen-high`; no Codex, por exemplo `gpt-6-luna`); sem valor, vale o padrão do CLI |
+| `CONTRACANTO_AGENT_EFFORT` | sem valor | Esforço de raciocínio do Codex (`minimal`, `low`, `medium`, `high` ou `xhigh`), passado como `-c model_reasoning_effort`; sem valor, vale o padrão do modelo. No `agy` não se aplica: o esforço vem no id do modelo |
 | `CONTRACANTO_AGENT_RETRIES` | 1 | Novas chamadas ao `agy` quando uma implementação ou correção falha (0 a 3) |
 | `CONTRACANTO_AUTO_RESUME` | 1 | Vezes que `wait_for_run` relança sozinho uma execução cujo worker morreu (0 a 3; 0 desliga) |
 | `CONTRACANTO_WORKTREES_DIR` | `~/.cache/Contracanto/worktrees` | Pasta onde ficam os worktrees das tarefas, separada por repositório; mantenha-a fora do repositório orquestrado |

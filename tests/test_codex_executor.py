@@ -75,10 +75,11 @@ class ParsingTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
-    def command(self, model='', platform='win32'):
+    def command(self, model='', platform='win32', effort=''):
         with (
             patch.object(config, 'CODEX_PATH', 'C:/codex/codex.exe'),
             patch.object(config, 'AGENT_MODEL', model),
+            patch.object(config, 'AGENT_EFFORT', effort),
             patch.object(agents.sys, 'platform', platform),
         ):
             return agents.codex_command('wt')
@@ -98,6 +99,12 @@ class CommandTests(unittest.TestCase):
         args = self.command(platform='linux')
         self.assertNotIn('--model', args)
         self.assertNotIn('windows.sandbox="elevated"', args)
+        self.assertFalse(any(arg.startswith('model_reasoning_effort') for arg in args))
+
+    def test_effort_goes_as_a_config_override(self):
+        args = self.command('gpt-6-luna', effort='high')
+        self.assertEqual(args[args.index('model_reasoning_effort="high"') - 1], '-c')
+        self.assertEqual(args[-3:], ['-C', 'wt', '-'])
 
 
 class CallTests(unittest.TestCase):

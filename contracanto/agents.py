@@ -267,6 +267,8 @@ def codex_command(wt: str | Path) -> list[str]:
         args += ['-c', 'windows.sandbox="elevated"']
     if config.AGENT_MODEL:
         args += ['--model', config.AGENT_MODEL]
+    if config.AGENT_EFFORT:
+        args += ['-c', f'model_reasoning_effort="{config.AGENT_EFFORT}"']
     return [*args, '-C', str(wt), '-']
 
 

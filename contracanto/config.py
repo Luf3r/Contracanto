@@ -118,6 +118,10 @@ EXECUTOR = _choice('EXECUTOR', 'agy', EXECUTORS)
 CODEX_PATH = _text('CODEX_PATH', 'codex')
 # Modelo do executor, passado em --model; vazio deixa o padrão do CLI (veja `agy models`).
 AGENT_MODEL = _text('AGENT_MODEL', '')
+# Esforço de raciocínio do Codex, passado como model_reasoning_effort; vazio deixa o padrão do
+# modelo. No agy o esforço faz parte do id do modelo (por exemplo gemini-4-hydrogen-high).
+AGENT_EFFORTS = ('', 'minimal', 'low', 'medium', 'high', 'xhigh')
+AGENT_EFFORT = _choice('AGENT_EFFORT', '', AGENT_EFFORTS)
 # Novas chamadas ao agy quando uma implementação ou correção falha sem deixar o worktree
 # em estado incerto.
 AGENT_RETRIES = _count('AGENT_RETRIES', 1, range(4))
@@ -162,6 +166,7 @@ TUNABLE = (
     'REVIEW_TIMEOUT',
     'REVIEW_MODEL',
     'AGENT_MODEL',
+    'AGENT_EFFORT',
     'EXECUTOR',
     'CODEX_PATH',
     'AGENT_RETRIES',

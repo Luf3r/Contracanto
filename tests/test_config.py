@@ -63,6 +63,7 @@ class ConfigLimitTests(unittest.TestCase):
         cases = {
             'CONTRACANTO_AGENT_RETRIES': '9',
             'CONTRACANTO_REVIEW_PATCH_LIMIT': 'muito',
+            'CONTRACANTO_AGENT_EFFORT': 'altissimo',
             # Abaixo disso o limite interno do agy passaria do próprio tempo total.
             'CONTRACANTO_AGENT_TIMEOUT': '30',
         }
