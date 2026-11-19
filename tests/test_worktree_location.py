@@ -38,12 +38,35 @@ class WorktreeLocationTests(support.RepositoryTestCase):
             self.assertFalse(run_dir.is_relative_to(first.resolve()))
             self.assertEqual(run_dir.name, 'f' * 16)
 
-    def test_default_location_is_the_local_cache(self):
-        with support.temp_dir() as directory, patch.object(config, 'WORKTREES_DIR', ''):
-            variable = 'LOCALAPPDATA' if os.name == 'nt' else 'XDG_CACHE_HOME'
-            with patch.dict(os.environ, {variable: str(directory)}):
-                parent = st.worktrees_parent()
-        self.assertEqual(parent, (directory / 'Contracanto' / 'worktrees').resolve())
+    def test_default_location_is_the_user_cache_outside_localappdata(self):
+        with (
+            support.temp_dir() as directory,
+            patch.object(config, 'WORKTREES_DIR', ''),
+            patch.dict(os.environ, {'XDG_CACHE_HOME': str(directory / 'cache'), 'LOCALAPPDATA': str(directory)}),
+        ):
+            parent = st.worktrees_parent()
+            legacy = st.legacy_worktrees_parent()
+        self.assertEqual(parent, (directory / 'cache' / 'Contracanto' / 'worktrees').resolve())
+        expected = (directory / 'Contracanto' / 'worktrees').resolve() if os.name == 'nt' else None
+        self.assertEqual(legacy, expected)
+
+    def test_configured_location_has_no_legacy_folder(self):
+        with support.temp_dir() as directory, patch.object(config, 'WORKTREES_DIR', str(directory)):
+            self.assertIsNone(st.legacy_worktrees_parent())
+            self.assertIsNone(st.Workspace.for_root(directory).legacy_worktrees)
+
+    def test_prune_also_removes_worktrees_left_in_the_legacy_folder(self):
+        with self.repository() as (root, store, base, task, git), support.temp_dir() as outside:
+            old, new = outside / 'old' / 'repo', outside / 'new' / 'repo'
+            self.ws = dataclasses.replace(self.ws, worktrees=old)
+            runner.execute(self.ws, {'tasks': [task]}, 1, 0, PASS, keep_worktrees=True)
+            (run_id,) = self.ws.run_ids()
+            # The default moved after the run: the worktree stays where the old default put it.
+            self.ws = dataclasses.replace(self.ws, worktrees=new, legacy_worktrees=old)
+            result = maintenance.prune_runs(self.ws, keep=0)
+            self.assertEqual(result['removed'], [run_id], result)
+            self.assertFalse((old / run_id[:16]).exists())
+            self.assertEqual(len(git('worktree', 'list').stdout.splitlines()), 1)
 
     def test_execution_and_prune_use_the_outside_directory(self):
         with self.repository() as (root, store, base, task, git), support.temp_dir() as outside:

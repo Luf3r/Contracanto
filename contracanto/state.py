@@ -47,12 +47,14 @@ class Workspace:
     """Repositório orquestrado, o diretório onde as execuções são registradas e o dos worktrees.
 
     Sem `worktrees`, os worktrees ficam em `store/worktrees`; `for_root` os põe fora do
-    repositório, em worktrees_parent().
+    repositório, em worktrees_parent(). `legacy_worktrees` é a pasta do padrão antigo, onde
+    execuções anteriores podem ter deixado worktrees que a limpeza ainda remove.
     """
 
     root: Path
     store: Path
     worktrees: Path | None = None
+    legacy_worktrees: Path | None = None
 
     @classmethod
     def for_root(cls, root: Path) -> Workspace:
@@ -61,11 +63,17 @@ class Workspace:
         # separar repositórios com o mesmo nome.
         key = str(root).casefold() if os.name == 'nt' else str(root)
         digest = hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]
-        return cls(root, root / '.agent-runs', worktrees_parent() / f'{root.name}-{digest}')
+        name = f'{root.name}-{digest}'
+        legacy = legacy_worktrees_parent()
+        return cls(root, root / '.agent-runs', worktrees_parent() / name, legacy / name if legacy else None)
 
     def worktree_dir(self, run_id: str) -> Path:
         """Diretório dos worktrees de uma execução; o prefixo do id mantém o caminho curto."""
         return (self.worktrees if self.worktrees is not None else self.store / 'worktrees') / run_id[:16]
+
+    def legacy_worktree_dir(self, run_id: str) -> Path | None:
+        """Onde o padrão antigo punha os worktrees da execução, se houver um padrão antigo."""
+        return self.legacy_worktrees / run_id[:16] if self.legacy_worktrees is not None else None
 
     @property
     def lock(self) -> Path:
@@ -145,14 +153,25 @@ REPO_ENV = 'CONTRACANTO_REPO'
 
 
 def worktrees_parent() -> Path:
-    """Onde ficam os worktrees de todos os repositórios: CONTRACANTO_WORKTREES_DIR ou o cache local."""
+    """Onde ficam os worktrees de todos os repositórios: CONTRACANTO_WORKTREES_DIR ou ~/.cache.
+
+    Também no Windows, fora de %LOCALAPPDATA%: um app empacotado em MSIX, como o app Claude,
+    redireciona o que seus processos gravam ali para a pasta do pacote, que o usuário do
+    sandbox do Codex não alcança, e todo comando de shell dele falharia.
+    """
     if config.WORKTREES_DIR:
         return Path(config.WORKTREES_DIR).expanduser().resolve()
-    if os.name == 'nt':
-        base = Path(os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local')
-    else:
-        base = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache')
+    base = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache')
     return (base / 'Contracanto' / 'worktrees').resolve()
+
+
+def legacy_worktrees_parent() -> Path | None:
+    """O padrão anterior no Windows, em %LOCALAPPDATA%; só vale sem CONTRACANTO_WORKTREES_DIR."""
+    if config.WORKTREES_DIR or os.name != 'nt':
+        return None
+    base = Path(os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local')
+    legacy = (base / 'Contracanto' / 'worktrees').resolve()
+    return None if legacy == worktrees_parent() else legacy
 
 
 def default_workspace(repo: str | Path | None = None) -> Workspace:

@@ -144,7 +144,7 @@ Tudo fica em `.agent-runs/runs/<run_id>/`:
 | `stop` | Presente quando houve pedido de encerramento |
 | `wt-<id>/` | Worktree de cada tarefa, só em execuções antigas; as novas usam a pasta abaixo |
 
-Os worktrees ficam fora do repositório, em `<pasta de worktrees>/<repositório>-<hash>/<16 primeiros caracteres do run_id>/wt-<id>/`. A pasta é `CONTRACANTO_WORKTREES_DIR` ou, sem ela, `%LOCALAPPDATA%\Contracanto\worktrees` no Windows e `~/.cache/Contracanto/worktrees` nos demais sistemas. O caminho exato de cada um está em `details.<id>.worktree` do status e em `git worktree list`.
+Os worktrees ficam fora do repositório, em `<pasta de worktrees>/<repositório>-<hash>/<16 primeiros caracteres do run_id>/wt-<id>/`. A pasta é `CONTRACANTO_WORKTREES_DIR` ou, sem ela, `~/.cache/Contracanto/worktrees` (ou `$XDG_CACHE_HOME/Contracanto/worktrees`), também no Windows. Até 19/11/2026, o padrão no Windows era `%LOCALAPPDATA%\Contracanto\worktrees`. Ele mudou porque o app Claude, empacotado em MSIX, redireciona essa pasta para a do pacote, que o sandbox do Codex não alcança. Worktrees de execuções antigas continuam onde estavam, e `--prune-runs` também os remove de lá. O caminho exato de cada um está em `details.<id>.worktree` do status e em `git worktree list`.
 
 `.agent-runs/latest-run` aponta para a execução mais recente. `get_submitted_plan()` retorna o `plan.json`, inclusive se a preparação falhar; uma execução recusada por reserva ativa não substitui o plano existente.
 
@@ -241,7 +241,7 @@ Para liberar um único worktree, use `git worktree remove "CAMINHO_EXATO"`. O Gi
 | `O operador fixou o comando` | Use o comando mostrado no erro, definido em `CONTRACANTO_TEST_COMMAND` ou `CONTRACANTO_SETUP_COMMAND` |
 | `Não encontrado no PATH: agy` (ou `claude`) | O PATH do processo MCP; depois de instalar, reinicie o app |
 | `Modelo do executor '…' não está em agy models` | `CONTRACANTO_AGENT_MODEL` e a lista de `agy models` |
-| `CreateProcessWithLogonW failed: 267` no stderr do codex | Worktrees em `%LOCALAPPDATA%` com o servidor aberto pelo app Claude; defina `CONTRACANTO_WORKTREES_DIR` fora de `AppData\Local` (veja Executor Codex no README) |
+| `CreateProcessWithLogonW failed: 267` no stderr do codex | `CONTRACANTO_WORKTREES_DIR` dentro de `%LOCALAPPDATA%` com o servidor aberto pelo app Claude; use uma pasta fora de `AppData\Local` ou deixe o padrão (veja Executor Codex no README) |
 | `ficou …s sem progresso` | O executor travou ou só leu arquivos; aumente `CONTRACANTO_AGENT_IDLE_TIMEOUT` se a tarefa exige uma leitura longa antes de escrever |
 | `Comando de testes não encontrado` ou `Comando de preparação não encontrado` | O nome do executável e o PATH do worker |
 | Nenhum estado gerado | O log do MCP; falhas antes do primeiro estado aparecem ali |

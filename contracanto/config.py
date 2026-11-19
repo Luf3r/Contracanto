@@ -129,7 +129,7 @@ AUTO_RESUME = _count('AUTO_RESUME', 1, range(4))
 REVIEW_PATCH_LIMIT = _count('REVIEW_PATCH_LIMIT', 400_000, range(1, 10_000_001))
 # Diretório onde ficam os worktrees das tarefas, fora do repositório orquestrado para que
 # ferramentas que varrem a árvore a partir da raiz não enxerguem as cópias. Vazio: a pasta
-# Contracanto/worktrees em %LOCALAPPDATA% no Windows ou em ~/.cache nos demais sistemas.
+# Contracanto/worktrees em ~/.cache (ou $XDG_CACHE_HOME), também no Windows; veja state.worktrees_parent.
 WORKTREES_DIR = _text('WORKTREES_DIR', '')
 
 # Comandos fixados pelo operador. Com TEST_COMMAND definido, só esse comando de testes é
