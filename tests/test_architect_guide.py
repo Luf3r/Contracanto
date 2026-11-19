@@ -26,8 +26,9 @@ class ArchitectGuideTests(unittest.TestCase):
         tools = {tool.name for tool in asyncio.run(server.mcp.list_tools())}
         self.assertIn('planning_guide', tools)
 
-    def test_claude_md_imports_the_guide(self):
-        self.assertIn('@contracanto/architect.md', (ROOT / 'CLAUDE.md').read_text(encoding='utf-8'))
+    def test_claude_md_imports_the_development_rules(self):
+        self.assertIn('@AGENTS.md', (ROOT / 'CLAUDE.md').read_text(encoding='utf-8'))
+        self.assertTrue((ROOT / 'AGENTS.md').is_file())
 
     def test_guide_is_shipped_with_the_package(self):
         pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')

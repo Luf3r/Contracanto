@@ -29,8 +29,7 @@ class GuideContentTests(unittest.TestCase):
         for text in ('fora de `files`', 'Bloqueio', 'base_tests', 'test_command', 'Não apague', 'dependências'):
             self.assertIn(text, agents.EXECUTOR_GUIDE)
 
-    def test_gemini_md_imports_the_guide_and_the_package_ships_it(self):
-        self.assertIn('@contracanto/executor.md', (ROOT / 'GEMINI.md').read_text(encoding='utf-8'))
+    def test_the_package_ships_the_guide(self):
         self.assertIn('"executor.md"', (ROOT / 'pyproject.toml').read_text(encoding='utf-8'))
 
 

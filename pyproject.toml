@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "contracanto"
 dynamic = ["version"]
-description = "Orquestração local: Claude planeja e revisa, Antigravity implementa em worktrees Git."
+description = "Orquestração local: Claude planeja e revisa, um executor (Antigravity ou Codex) implementa em worktrees Git."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

@@ -1,5 +1,5 @@
-# Papel do Claude: arquiteto
+# Contracanto
 
-O guia do arquiteto fica em `contracanto/architect.md`, para o servidor MCP poder entregá-lo em qualquer repositório (ferramenta `planning_guide`). Edite o guia lá.
+As regras para desenvolver este repositório estão no `AGENTS.md`. O guia do arquiteto dos projetos orquestrados fica em `contracanto/architect.md` e chega a eles pelo servidor MCP.
 
-@contracanto/architect.md
+@AGENTS.md

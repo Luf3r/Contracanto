@@ -17,7 +17,7 @@ from .plan import parse_command, validate
 from .plan import warnings as plan_warnings
 from .runner import check_repository, preflight
 
-# Guia do arquiteto, também importado pelo CLAUDE.md do repositório. As instruções do
+# Guia do arquiteto dos projetos orquestrados. As instruções do
 # servidor chegam a toda sessão que usa o MCP, em qualquer repositório; o guia completo
 # vem pela ferramenta planning_guide, para não pesar no contexto de quem só consulta.
 ARCHITECT_GUIDE = Path(__file__).with_name('architect.md')

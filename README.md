@@ -135,6 +135,8 @@ Sem as duas últimas variáveis, quem chama `submit_plan` escolhe os comandos, e
 
 ## Testes deste projeto
 
+As convenções para desenvolver o Contracanto, inclusive a verificação completa antes de um commit, estão no `AGENTS.md`.
+
 Os testes usam `unittest`, incluído no Python, e Git local. Não chamam os CLIs dos modelos nem consomem tokens. O executor paralelo roda cada teste em um processo próprio, com um processo por núcleo por padrão:
 
 ```powershell
@@ -261,8 +263,8 @@ Instalado, o pacote oferece os comandos `contracanto` e `contracanto-mcp`. `exam
 | `windows_job.py` | Job Object usado pela contenção no Windows |
 | `gitops.py` | Consultas e verificações Git: limpeza, escopo, branch e HEAD |
 | `agents.py` | Chamadas ao executor, `agy` ou `codex` (implementação e correção), e ao `claude` (revisão) |
-| `architect.md` | Guia do arquiteto, entregue pelas instruções do servidor e pela ferramenta `planning_guide` e importado pelo `CLAUDE.md` |
-| `executor.md` | Guia do executor, colocado em todo pedido de implementação e de correção e importado pelo `GEMINI.md`: escopo, o que fazer quando o plano não fecha, o que não fazer para os testes passarem, verificação e formato do relatório |
+| `architect.md` | Guia do arquiteto, entregue pelas instruções do servidor e pela ferramenta `planning_guide` |
+| `executor.md` | Guia do executor, colocado em todo pedido de implementação e de correção: escopo, o que fazer quando o plano não fecha, o que não fazer para os testes passarem, verificação e formato do relatório |
 | `runner.py` | Ciclo da execução: lotes, revisão, integração e rollback |
 | `maintenance.py` | Consulta de status, destravamento da reserva, retomada e poda de execuções |
 | `server.py` | Ferramentas MCP e lançamento do worker |
