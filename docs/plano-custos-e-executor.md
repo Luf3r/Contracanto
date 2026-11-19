@@ -112,6 +112,13 @@ A F1 precisa normalizar os três para um formato único: `input` sem cache, `cac
 
 **Pronto quando:** `contracanto --watch` e `wait_for_run` mostrarem o custo de API e o desperdício, e o cálculo tiver teste para cache, contexto longo e preço ausente.
 
+**Situação (19/11/2026): implementada.** Diferenças em relação ao desenho acima:
+
+- **Custo por chamada:** o custo é calculado no momento em que os tokens da chamada são registrados, e não sobre os totais, porque a tarifa de contexto longo vale por pedido. O maior pedido de cada chamada vem dos passos do `agy`.
+- **Modelo lido da saída:** o modelo vem da própria saída do CLI. Sem preço configurado, vale o custo que o CLI informa; hoje só o `claude` informa um.
+- **Cobrança configurável:** `CONTRACANTO_EXECUTOR_BILLING` e `CONTRACANTO_REVIEWER_BILLING` (padrão `plan`) ficam no lugar da detecção por `codex login status`. Com o login do ChatGPT, o executor Luna fica em `plan`, e passa para `api` se o login for com chave.
+- **Sem preço do Gemini:** a página oficial não foi consultada, então as chamadas do `agy` contam em `unpriced_calls` até alguém configurar esse preço.
+
 ## F3: categorizar falhas
 
 - `errors.py`: um enum `FailureCategory` com os valores `tooling` (worker, executável ausente, git, preparação), `executor_noop`, `stalled`, `scope`, `patch_too_large`, `inherited_base`, `review_rejected`, `criteria_unverifiable`, `integration` e `cancelled`.

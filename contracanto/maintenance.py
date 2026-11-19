@@ -120,6 +120,7 @@ def summarize(report: dict[str, Any]) -> dict[str, Any]:
         'target': run.get('target'),
         'task_errors': errors,
         'task_failures': failures,
+        'cost': run.get('cost'),
         'waste': run.get('waste'),
         'reservation_state': report['reservation_state'],
         'worker_alive': reservation.get('worker_alive'),

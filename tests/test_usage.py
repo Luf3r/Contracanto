@@ -17,8 +17,22 @@ from contracanto import state as st
 FIXTURES = Path(__file__).parent / 'fixtures' / 'agents'
 AGY = (FIXTURES / 'agy-stream.jsonl').read_text(encoding='utf-8')
 CLAUDE = (FIXTURES / 'claude-review.json').read_text(encoding='utf-8')
-AGY_USAGE = usage.Usage(input=20780, cached_input=37372, output=1061 + 229, reasoning=229)
-CLAUDE_USAGE = usage.Usage(input=2, cached_input=649, cache_write=2797, output=35)
+AGY_USAGE = usage.Usage(
+    input=20780,
+    cached_input=37372,
+    output=1061 + 229,
+    reasoning=229,
+    model='gemini-4-hydrogen-high',
+    peak_input=2372 + 10500,
+)
+CLAUDE_USAGE = usage.Usage(
+    input=2, cached_input=649, cache_write=2797, output=35, model='claude-sonnet-5-5', reported_usd=0.0116069
+)
+
+
+def tokens_of(total):
+    """Only the summed token fields of a role total, which also carries cost and billing."""
+    return {name: total[name] for name in usage.FIELDS}
 
 
 def agy_result(**result):
@@ -76,7 +90,7 @@ class AccumulationTests(unittest.TestCase):
         self.assertEqual(phases['implementation']['count'], 1)
         self.assertEqual(phases['review']['tokens'], CLAUDE_USAGE.as_dict())
         self.assertEqual(snapshot['usage']['executor']['calls'], 2)
-        self.assertEqual(snapshot['usage']['reviewer'], CLAUDE_USAGE.as_dict())
+        self.assertEqual(tokens_of(snapshot['usage']['reviewer']), CLAUDE_USAGE.as_dict())
 
     def test_status_without_measured_calls_has_no_usage(self):
         with support.temp_dir() as directory:
@@ -153,7 +167,8 @@ class AgentCallTests(unittest.TestCase):
             snapshot = run.snapshot()
         self.assertTrue(approved)
         self.assertEqual(snapshot['timings']['A']['phases']['review']['tokens'], CLAUDE_USAGE.as_dict())
-        self.assertEqual(snapshot['usage'], {'reviewer': CLAUDE_USAGE.as_dict()})
+        self.assertEqual(list(snapshot['usage']), ['reviewer'])
+        self.assertEqual(tokens_of(snapshot['usage']['reviewer']), CLAUDE_USAGE.as_dict())
 
 
 class RunStatusTests(support.RepositoryTestCase):
@@ -173,7 +188,8 @@ class RunStatusTests(support.RepositoryTestCase):
             status = support.read_status(self.ws)
         self.assertEqual(status['state'], 'completed')
         self.assertEqual(status['timings']['A']['phases']['review']['tokens'], CLAUDE_USAGE.as_dict())
-        self.assertEqual(status['usage'], {'reviewer': CLAUDE_USAGE.as_dict()})
+        self.assertEqual(list(status['usage']), ['reviewer'])
+        self.assertEqual(tokens_of(status['usage']['reviewer']), CLAUDE_USAGE.as_dict())
 
 
 if __name__ == '__main__':

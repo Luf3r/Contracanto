@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from . import config, usage
+from . import config, pricing, usage
 from .errors import RecoveryRequired, RunCancelled
 
 RunStatus = Literal['starting', 'running', 'completed', 'failed', 'cancelled']
@@ -30,6 +30,8 @@ UNFINISHED_STATUSES: tuple[TaskStatus, ...] = ('pending', 'running', 'review')
 FINISHED_STATUSES: tuple[TaskStatus, ...] = ('approved', 'failed', 'blocked', 'cancelled')
 # Tarefas cujo tempo e tokens não viraram commit; uma bloqueada nem chegou a gastar.
 WASTED_STATUSES: tuple[TaskStatus, ...] = ('failed', 'cancelled')
+# Casas decimais dos custos gravados, em dólares.
+COST_DIGITS = 6
 RUN_ID = re.compile('[0-9a-f]{64}')
 
 log = logging.getLogger('contracanto')
@@ -216,8 +218,8 @@ class RunState:
         self.statuses: dict[str, TaskStatus] = {}
         self.details: dict[str, dict[str, Any]] = {}
         self.timings: dict[str, dict[str, Any]] = {}
-        # Tokens somados por papel (executor, revisor), além dos de cada fase em `timings`.
-        self.usage: dict[str, dict[str, int]] = {}
+        # Tokens e custo somados por papel (executor, revisor), além dos de cada fase em `timings`.
+        self.usage: dict[str, dict[str, Any]] = {}
         self.recovery_required = False
         self.error: str | None = None
         # Branch de destino e commit sobre o qual a execução começou.
@@ -244,6 +246,7 @@ class RunState:
             }
             if self.usage:
                 data['usage'] = self.usage
+                data['cost'] = self._cost()
             if waste := self._waste():
                 data['waste'] = waste
             if self.error is not None:
@@ -259,11 +262,13 @@ class RunState:
         if not lost:
             return None
         seconds = 0.0
+        cost = 0.0
         tokens: dict[str, int] = {}
         categories: dict[str, int] = {}
         for task_id in lost:
             for entry in self.timings.get(task_id, {}).get('phases', {}).values():
                 seconds += entry.get('seconds', 0.0)
+                cost += entry.get('cost_usd', 0.0)
                 for name, value in (entry.get('tokens') or {}).items():
                     tokens[name] = tokens.get(name, 0) + value
             failure = self.details.get(task_id, {}).get('failure')
@@ -272,6 +277,7 @@ class RunState:
         waste: dict[str, Any] = {'tasks': len(lost), 'seconds': round(seconds, 1), 'by_category': categories}
         if tokens:
             waste['tokens'] = tokens
+            waste['cost_usd'] = round(cost, COST_DIGITS)
         return waste
 
     def save(self) -> None:
@@ -312,11 +318,31 @@ class RunState:
         return entry
 
     def add_usage(self, task_id: str, name: Phase, role: usage.Role, used: usage.Usage) -> None:
-        """Soma os tokens de uma chamada à fase da tarefa e ao total do papel."""
+        """Soma os tokens e o custo de uma chamada à fase da tarefa e ao total do papel."""
+        cost = pricing.call_cost(config.PRICES, used.model, used.as_dict(), used.peak_input, used.reported_usd)
         with self._lock:
             entry = self._phase_entry(task_id, name)
             entry['tokens'] = usage.add(entry.get('tokens'), used)
-            self.usage[role] = usage.add(self.usage.get(role), used)
+            _add_cost(entry, cost)
+            total = usage.add(self.usage.get(role), used)
+            _add_cost(total, cost)
+            total['billing'] = BILLING[role]()
+            if used.model and used.model not in total.setdefault('models', []):
+                total['models'].append(used.model)
+            self.usage[role] = total
+
+    def _cost(self) -> dict[str, Any]:
+        """Custo da execução separado entre cobrança por token e equivalente de assinatura."""
+        by_billing = {'api': 0.0, 'plan': 0.0}
+        unpriced = 0
+        for total in self.usage.values():
+            by_billing[total.get('billing', 'plan')] += total.get('cost_usd', 0.0)
+            unpriced += total.get('unpriced_calls', 0)
+        return {
+            'api_usd': round(by_billing['api'], COST_DIGITS),
+            'plan_equivalent_usd': round(by_billing['plan'], COST_DIGITS),
+            'unpriced_calls': unpriced,
+        }
 
     @contextlib.contextmanager
     def phase(self, task_id: str, name: Phase) -> Iterator[None]:
@@ -357,6 +383,22 @@ class RunState:
             self.recovery_required = True
             self.close_unfinished()
             self.save()
+
+
+BILLING: dict[str, Callable[[], str]] = {
+    'executor': lambda: config.EXECUTOR_BILLING,
+    'reviewer': lambda: config.REVIEWER_BILLING,
+}
+
+
+def _add_cost(entry: dict[str, Any], cost: pricing.CallCost) -> None:
+    """Soma o custo de uma chamada a uma entrada do status; sem preço, conta a chamada à parte."""
+    if cost.usd is None:
+        entry['unpriced_calls'] = entry.get('unpriced_calls', 0) + 1
+    else:
+        entry['cost_usd'] = round(entry.get('cost_usd', 0.0) + cost.usd, COST_DIGITS)
+    if cost.long_context:
+        entry['long_context_calls'] = entry.get('long_context_calls', 0) + 1
 
 
 @dataclass

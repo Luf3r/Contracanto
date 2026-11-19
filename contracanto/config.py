@@ -11,6 +11,7 @@ import json
 import os
 from collections.abc import Sequence
 
+from . import pricing
 from .errors import ConfigError
 
 ENV_PREFIX = 'CONTRACANTO_'
@@ -53,6 +54,13 @@ def _count(name: str, default: int, allowed: range) -> int:
 
 def _text(name: str, default: str) -> str:
     return os.environ.get(ENV_PREFIX + name, '').strip() or default
+
+
+def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    value = _text(name, default)
+    if value not in allowed:
+        raise ConfigError(f'{ENV_PREFIX}{name} deve ser um de {", ".join(allowed)}, recebido {value!r}')
+    return value
 
 
 def _command(name: str, allow_empty: bool = False) -> list[str] | None:
@@ -111,6 +119,14 @@ WORKTREES_DIR = _text('WORKTREES_DIR', '')
 TEST_COMMAND = _command('TEST_COMMAND')
 SETUP_COMMAND = _command('SETUP_COMMAND', allow_empty=True)
 
+# Preço por modelo para estimar o custo das chamadas (veja pricing.py); vazio deixa só os tokens.
+PRICES = pricing.load(os.environ.get(ENV_PREFIX + 'PRICES_JSON'), ENV_PREFIX + 'PRICES_JSON')
+# Como cada papel é cobrado: `api` cobra por token; `plan` sai do limite de uma assinatura, e o
+# custo fica só como equivalente informativo.
+BILLING_MODES = ('plan', 'api')
+EXECUTOR_BILLING = _choice('EXECUTOR_BILLING', 'plan', BILLING_MODES)
+REVIEWER_BILLING = _choice('REVIEWER_BILLING', 'plan', BILLING_MODES)
+
 # Caudas preservadas em mensagens e no pedido de revisão.
 ERROR_TAIL = 2000
 TEST_OUTPUT_TAIL = 10000
@@ -129,6 +145,9 @@ TUNABLE = (
     'WORKTREES_DIR',
     'TEST_COMMAND',
     'SETUP_COMMAND',
+    'PRICES_JSON',
+    'EXECUTOR_BILLING',
+    'REVIEWER_BILLING',
 )
 
 

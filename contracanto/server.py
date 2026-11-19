@@ -325,7 +325,8 @@ async def wait_for_run(timeout_seconds: int = 120) -> str:
     caso chame de novo. Mantenha timeout_seconds abaixo do tempo limite de ferramentas do cliente.
     O resumo traz run_id, state, statuses, target (branch de destino e commit de partida),
     task_errors, task_failures (a categoria da falha de cada tarefa), waste (tempo, tokens e
-    categorias das tarefas que falharam ou foram canceladas), recovery_required, error,
+    categorias das tarefas que falharam ou foram canceladas), cost (custo estimado por tipo de
+    cobrança), recovery_required, error,
     duration_seconds, reservation_state, worker_alive e stop_requested. Para pareceres, tempos
     por fase e log, use get_run_status.
     Se o worker morreu sem registrar o estado final, a ferramenta libera a reserva e relança

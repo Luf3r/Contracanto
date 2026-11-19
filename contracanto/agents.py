@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import logging
 import subprocess
@@ -205,7 +206,10 @@ def run_agy(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
         stop=stop,
     )
     # Registrado antes do parsing: uma chamada que termina com erro também gastou tokens.
-    usage.record('executor', usage.from_agy(result.stdout))
+    used = usage.from_agy(result.stdout)
+    if used is not None and not used.model and config.AGENT_MODEL:
+        used = dataclasses.replace(used, model=config.AGENT_MODEL)
+    usage.record('executor', used)
     return parse_agy_output(result.stdout)
 
 

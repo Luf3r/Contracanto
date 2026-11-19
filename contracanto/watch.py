@@ -137,6 +137,11 @@ def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[: max(0, width - 1)] + '…'
 
 
+def _money(usd: float) -> str:
+    """Dólares com centavos; abaixo de um dólar, com as frações que uma chamada barata tem."""
+    return f'US$ {usd:.2f}' if usd >= 1 else f'US$ {usd:.4f}'
+
+
 def _labeled_error(detail: dict[str, Any]) -> str | None:
     """Erro da tarefa precedido da categoria da falha, quando ela foi registrada."""
     error = detail.get('error')
@@ -217,10 +222,22 @@ def render(report: dict[str, Any], log: str, now: datetime, width: int = 100, co
             summary = _clip(maintenance.abbreviate(str(error), room), room)
             lines.append('  ' + p.paint(task_id, 'failed') + ': ' + summary)
 
+    cost = run.get('cost') or {}
+    if cost:
+        parts = [
+            f'API {_money(cost.get("api_usd") or 0)}',
+            f'assinatura (equivalente) {_money(cost.get("plan_equivalent_usd") or 0)}',
+        ]
+        if cost.get('unpriced_calls'):
+            parts.append(f'{cost["unpriced_calls"]} chamada(s) sem preço')
+        lines += ['', p.bold('Custo') + '  ' + _clip(' · '.join(parts), width)]
+
     waste = run.get('waste') or {}
     if waste.get('tasks'):
         categories = ', '.join(f'{name} {count}' for name, count in sorted((waste.get('by_category') or {}).items()))
         text = f'{waste["tasks"]} tarefa(s), {_duration(waste.get("seconds") or 0)}'
+        if 'cost_usd' in waste:
+            text += f', {_money(waste["cost_usd"])}'
         lines += ['', p.bold('Desperdício') + '  ' + _clip(text + (f' ({categories})' if categories else ''), width)]
 
     events = [line for line in log.splitlines() if line.strip()][-EVENT_LINES:]

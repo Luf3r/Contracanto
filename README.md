@@ -95,6 +95,9 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_AUTO_RESUME` | 1 | Vezes que `wait_for_run` relança sozinho uma execução cujo worker morreu (0 a 3; 0 desliga) |
 | `CONTRACANTO_WORKTREES_DIR` | cache local | Pasta onde ficam os worktrees das tarefas, separada por repositório; mantenha-a fora do repositório orquestrado |
 | `CONTRACANTO_REVIEW_PATCH_LIMIT` | 400000 | Tamanho máximo do patch enviado ao revisor, em caracteres |
+| `CONTRACANTO_PRICES_JSON` | sem valor | Preço por modelo, em dólares por milhão de tokens, para estimar o custo de cada chamada; formato em [docs/recuperacao.md](docs/recuperacao.md#custo). Sem valor, só o custo que o próprio CLI informa é usado |
+| `CONTRACANTO_EXECUTOR_BILLING` | `plan` | `api` quando o executor é cobrado por token; `plan` quando sai do limite de uma assinatura, e o custo vale só como equivalente |
+| `CONTRACANTO_REVIEWER_BILLING` | `plan` | O mesmo para o revisor (`claude -p`) |
 | `CONTRACANTO_TEST_COMMAND` | sem valor | Lista JSON de argumentos. Fixa o comando de testes: um comando diferente é recusado |
 | `CONTRACANTO_SETUP_COMMAND` | sem valor | Lista JSON de argumentos. Fixa o comando de preparação: um diferente é recusado e, sem nenhum informado, ele é usado; `[]` proíbe qualquer preparação |
 
@@ -239,7 +242,7 @@ Nenhum módulo guarda estado global: o repositório e o diretório de execuçõe
 
 `pyproject.toml` é a única declaração das dependências diretas (`mcp` e, no Windows, `pywin32`) e das ferramentas de desenvolvimento (`ruff` e `mypy`, no extra `dev`), além do pacote e de seus comandos. `requirements.lock.txt` fixa também as transitivas do ambiente validado; use-o na instalação e na CI. Para desenvolver, instale o lock e depois `python -m pip install -e ".[dev]"`. A CI confere com `scripts/check_lock.py` que o lock fixa as mesmas versões declaradas em `pyproject.toml` e executa `ruff check .`, `ruff format --check .` e `mypy` além dos testes, pelo executor paralelo. O `mypy` confere o pacote, `scripts/` e `tests/`. A versão do pacote fica em `contracanto/__init__.py`. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
 
-A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Os tokens são registrados, mas não há orçamento nem limite de tokens ou de custo. A retomada automática cobre o worker que morre com o repositório íntegro; quando o Git ou os subprocessos ficam em estado incerto, a reserva e a recuperação manual continuam obrigatórias.
+A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Os tokens e o custo estimado são registrados, mas não há orçamento nem limite de tokens ou de custo. A retomada automática cobre o worker que morre com o repositório íntegro; quando o Git ou os subprocessos ficam em estado incerto, a reserva e a recuperação manual continuam obrigatórias.
 
 ## Licença
 

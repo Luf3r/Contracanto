@@ -17,7 +17,7 @@ O relatório completo é um objeto JSON com quatro campos:
 
 `worker_alive` é `false` quando o processo que deveria estar trabalhando na execução não existe mais: o worker que a assumiu ou, antes disso, o worker lançado pelo MCP ou o processo que criou a reserva. Nesse caso o estado gravado não muda mais, mesmo que diga `running`. `wait_for_run` tenta então a retomada automática, descrita abaixo; se ela não for possível, siga [Após um encerramento abrupto](#após-um-encerramento-abrupto).
 
-O resumo de `wait_for_run` traz `run_id`, `state`, `statuses`, `target`, `task_errors` (o começo do erro de cada tarefa que falhou), `task_failures` (a categoria da falha de cada tarefa, descrita abaixo), `waste` (igual ao do `status.json`), `recovery_required`, `error`, `duration_seconds`, `reservation_state`, `worker_alive`, `stop_requested` e `timed_out`. A ferramenta retorna assim que a execução chega a um estado final, o worker morre ou não há execução reservada. Se o tempo pedido (1 a 600 segundos) acabar antes, `timed_out` vem `true` e basta chamar de novo. Pareceres, tempos por fase e log ficam só no relatório completo.
+O resumo de `wait_for_run` traz `run_id`, `state`, `statuses`, `target`, `task_errors` (o começo do erro de cada tarefa que falhou), `task_failures` (a categoria da falha de cada tarefa, descrita abaixo), `waste` e `cost` (iguais aos do `status.json`), `recovery_required`, `error`, `duration_seconds`, `reservation_state`, `worker_alive`, `stop_requested` e `timed_out`. A ferramenta retorna assim que a execução chega a um estado final, o worker morre ou não há execução reservada. Se o tempo pedido (1 a 600 segundos) acabar antes, `timed_out` vem `true` e basta chamar de novo. Pareceres, tempos por fase e log ficam só no relatório completo.
 
 ### Estados
 
@@ -39,8 +39,9 @@ Além de `state`, `run_id`, `statuses`, `details`, `recovery_required` e `error`
 - `duration_seconds`: duração da execução até a última gravação ou até o estado final.
 - `target`: a `branch` de destino (ref completa) e o commit `base` sobre o qual a execução começou; ausente quando a preparação falha antes disso. `branch_removed: true` indica que a branch de integração terminou vazia e foi apagada.
 - `timings.<id>`: `started_at` e `finished_at` da tarefa e, em `phases`, os segundos acumulados e o número de vezes de cada fase (`implementation`, `review`, `repair`, `integration`). Uma tarefa bloqueada antes de começar não tem `started_at`. Quando o CLI chamado na fase informa tokens, a fase também traz `tokens`, descrito abaixo.
-- `usage`: os tokens somados da execução por papel, em `executor` (implementação e correções) e `reviewer` (revisões). O campo só aparece depois da primeira chamada medida.
-- `waste`: o que foi gasto nas tarefas que falharam ou foram canceladas, com `tasks` (quantas), `seconds` (soma das fases), `tokens` (no formato abaixo, quando medidos) e `by_category` (quantas falhas de cada categoria). Só aparece quando alguma tarefa falhou ou foi cancelada. Tarefas bloqueadas não entram, porque não chegaram a rodar, nem as correções de uma tarefa que acabou aprovada.
+- `usage`: os tokens somados da execução por papel, em `executor` (implementação e correções) e `reviewer` (revisões). Além dos campos de tokens, cada papel traz `billing` (`api` ou `plan`), `models` (os modelos que responderam) e os campos de custo descritos em [Custo](#custo). O campo só aparece depois da primeira chamada medida.
+- `cost`: o custo estimado da execução, com `api_usd` (papéis cobrados por token), `plan_equivalent_usd` (papéis que saem do limite de uma assinatura, só como referência) e `unpriced_calls` (chamadas sem preço, que esses totais não incluem). Aparece junto com `usage`.
+- `waste`: o que foi gasto nas tarefas que falharam ou foram canceladas, com `tasks` (quantas), `seconds` (soma das fases), `tokens` (no formato abaixo, quando medidos), `cost_usd` (quando há tokens medidos) e `by_category` (quantas falhas de cada categoria). Só aparece quando alguma tarefa falhou ou foi cancelada. Tarefas bloqueadas não entram, porque não chegaram a rodar, nem as correções de uma tarefa que acabou aprovada.
 
 `tokens` e cada papel de `usage` têm o mesmo formato, com os campos somados entre todas as chamadas, inclusive as que falharam e as novas tentativas:
 
@@ -52,6 +53,24 @@ Além de `state`, `run_id`, `statuses`, `details`, `recovery_required` e `error`
 - `calls`: número de chamadas medidas.
 
 Os números vêm do próprio CLI: do evento `result` do `agy` e do campo `usage` do `claude -p`. Uma saída sem contagem não registra nada e não faz a chamada falhar, então uma fase sem `tokens` não significa zero tokens.
+
+### Custo
+
+O custo é calculado por chamada, com o modelo que a própria saída do CLI informa (o evento `init` do `agy`, ou `CONTRACANTO_AGENT_MODEL` sem ele, e o `modelUsage` do `claude -p`). Cada fase soma `cost_usd`, `unpriced_calls` (chamadas sem preço) e `long_context_calls` (chamadas cobradas como contexto longo). Os mesmos campos aparecem em cada papel de `usage`.
+
+O preço vem de `CONTRACANTO_PRICES_JSON`, um objeto com um preço por modelo, em dólares por milhão de tokens. `long_context` é opcional:
+
+```json
+{"gpt-6-luna": {"input": 0.10, "cached_input": 0.01, "cache_write": 0.125, "output": 0.50,
+  "long_context": {"threshold": 272000, "input": 0.20, "cached_input": 0.02, "cache_write": 0.25, "output": 0.75}}}
+```
+
+Regras do cálculo:
+
+- `output` inclui o raciocínio, como os provedores cobram.
+- Quando o maior pedido de uma chamada passa de `threshold` tokens de entrada, a chamada inteira vale pelas tarifas de contexto longo. O provedor cobra assim cada pedido acima do limite, mas os CLIs só informam a soma da chamada, então o custo fica pelo lado de cima. Hoje só o `agy` informa os pedidos um a um.
+- Sem o modelo na tabela, vale o custo que o próprio CLI informa. O `claude -p` informa o preço de tabela mesmo numa assinatura. Sem nenhum dos dois, a chamada entra em `unpriced_calls`.
+- `CONTRACANTO_EXECUTOR_BILLING` e `CONTRACANTO_REVIEWER_BILLING` dizem em qual total de `cost` cada papel entra. O padrão é `plan` para os dois.
 
 ### Detalhes de cada tarefa
 
