@@ -25,6 +25,9 @@ contracanto-mcp = "contracanto.__main__:serve"
 [tool.setuptools]
 packages = ["contracanto"]
 
+[tool.setuptools.package-data]
+contracanto = ["architect.md"]
+
 [tool.setuptools.dynamic]
 version = {attr = "contracanto.__version__"}
 

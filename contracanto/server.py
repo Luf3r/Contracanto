@@ -17,7 +17,22 @@ from .plan import parse_command, validate
 from .plan import warnings as plan_warnings
 from .runner import check_repository, preflight
 
-mcp = FastMCP('Contracanto')
+# Guia do arquiteto, também importado pelo CLAUDE.md do repositório. As instruções do
+# servidor chegam a toda sessão que usa o MCP, em qualquer repositório; o guia completo
+# vem pela ferramenta planning_guide, para não pesar no contexto de quem só consulta.
+ARCHITECT_GUIDE = Path(__file__).with_name('architect.md')
+INSTRUCTIONS = (
+    'Contracanto: você é o arquiteto. Planeja as tarefas e acompanha a execução; um executor (agy ou '
+    'Codex) implementa cada tarefa num worktree, um revisor confere o diff e a integração roda o comando '
+    'de testes na branch de destino. Antes do primeiro submit_plan da sessão, leia o guia completo com '
+    'planning_guide: ele diz como dividir as tarefas, escrever descrições e critérios que o revisor aprova e '
+    'agir em cada categoria de falha. Regras que valem sempre: cada description se sustenta sozinha, '
+    'porque o executor não vê as outras tarefas; files lista todo arquivo que precisa mudar, inclusive '
+    'testes, fixtures e docs; cada critério é comprovável pelo diff ou pela saída do comando de testes; '
+    'tarefas paralelas tocam arquivos disjuntos; nada de produção, credenciais ou infraestrutura sem '
+    'permissão do operador.'
+)
+mcp = FastMCP('Contracanto', instructions=INSTRUCTIONS)
 WORKSPACE = state.default_workspace()
 # Diretório que contém o pacote; o worker o recebe no PYTHONPATH para rodar com
 # `python -m contracanto` em qualquer repositório, instalado ou não.
@@ -117,6 +132,7 @@ def submit_plan(
     test_command_json: str,
 ) -> str:
     """Recebe um plano criado pelo Claude e INICIA sua execução local em segundo plano.
+    Antes do primeiro plano da sessão, leia planning_guide.
     plan_json: objeto JSON com goal e tasks [{id,description,deps,files,acceptance}].
     id e description são strings; deps é uma lista de ids (pode ser []); files e acceptance
     são listas não vazias de strings, mesmo com um item só, ex. "files": ["src/app.py"],
@@ -365,6 +381,14 @@ async def wait_for_run(timeout_seconds: int = 120) -> str:
     if resumed:
         summary['auto_resume'] = resumed
     return json.dumps(summary, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def planning_guide() -> str:
+    """Guia do arquiteto: como dividir o pedido em tarefas, escrever description, files e
+    acceptance, conferir o plano antes de submit_plan, acompanhar a execução e agir em cada
+    categoria de falha. Leia antes do primeiro submit_plan da sessão."""
+    return ARCHITECT_GUIDE.read_text(encoding='utf-8')
 
 
 @mcp.tool()
