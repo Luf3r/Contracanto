@@ -234,6 +234,30 @@ O aviso vai na resposta da ferramenta, para o arquiteto decidir.
   - nenhuma falha da categoria `tooling`.
 - Registrar o resultado e decidir o executor padrão.
 
+### Resultado da F7 (19/11/2026)
+
+Tarefas: o item 4.2 do plano de refatoração do Sanagua (logger estruturado), dividido em L1 (`src/shared/logger.ts`), L2 (pontos de entrada HTTP e MCP) e L3 (fila e manutenção), em sequência. Cada executor rodou o mesmo plano, com `--parallel 1 --retries 2`, `npm ci` de preparação e `npm run check` como teste, numa branch nova criada no mesmo commit.
+
+| | `codex` + `gpt-6-luna` | `agy` + `gemini-4-hydrogen-high` |
+|---|---|---|
+| Aprovadas | 3 de 3 | 2 de 3 (L3: `executor_noop`) |
+| Aprovação na 1ª revisão | 3 de 3 | 2 de 2 |
+| Reparos | 0 | 0 |
+| Tempo total | 33 min | 31 min, com uma tarefa a menos |
+| Implementação de L1 + L2 | 12 min | 22 min |
+| Tokens do executor em L1 + L2 (entrada sem cache / saída) | 82 mil / 11 mil | 255 mil / 79 mil |
+| Custo de API do executor | US$ 0,056 nas 3 tarefas (US$ 0,019 por tarefa aprovada) | sem preço configurado |
+| Revisão (equivalente no plano) | US$ 0,19 | US$ 0,15 |
+| Desperdício | 0% | 10% do tempo (193 s, `executor_noop`) |
+| Falhas `tooling` | nenhuma | nenhuma |
+
+As metas iniciais foram atingidas pelos dois. A cobrança foi a do plano nos dois executores: `api_usd` ficou em zero.
+
+- **L3 expôs uma falha do plano, não dos executores:** tornar `attempts: number` obrigatório em `QueueBatch` quebra três arquivos de teste que não estavam em `files`. O `agy` respeitou o escopo, não alterou nada e explicou o que faltava. O Codex entregou com uma sobrecarga `LegacyQueueBatch` que deixa `attempts` opcional na prática, e o revisor aprovou com essa ressalva. Isso conta como diferença de comportamento: o Codex prefere entregar dentro do escopo dobrando a especificação, e o `agy` prefere parar.
+- **Diffs:** o Codex escreveu menos (320 linhas nas 3 tarefas, contra 427 do `agy` só em L1 e L2).
+- **Primeira tentativa invalidada:** a primeira rodada do Codex falhou na L2 pela cobertura de `src/automation`, que oscilava sob carga por causa de uma corrida no teste de execuções concorrentes. A correção, um teste que fixa os dois caminhos da corrida, entrou no Sanagua antes da rodada comparada.
+- **Executor padrão:** a decisão fica com o responsável. Os números favorecem o Codex em tempo, tokens e aprovação. A ressalva é o comportamento na L3, que pede critérios explícitos quando a tarefa não puder sair do escopo.
+
 ## Estimativa de esforço
 
 | Fase | Tamanho | Observação |
