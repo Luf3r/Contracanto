@@ -1,6 +1,6 @@
 # Contracanto
 
-Claude planeja e revisa. Antigravity implementa cada tarefa em um worktree Git. Um servidor MCP em Python coordena os dois e integra as mudanças após a revisão e os testes.
+Claude planeja e revisa. Antigravity (ou, se configurado, o Codex CLI) implementa cada tarefa em um worktree Git. Um servidor MCP em Python coordena os dois e integra as mudanças após a revisão e os testes.
 
 Ferramenta de integração local, exercitada com os agentes reais no Windows (execução, branch de integração, retomada manual e automática); a suíte automatizada roda em Windows e Linux. Cada máquina precisa validar suas credenciais e permissões. A revisão é feita por um modelo e não substitui a sua: em um repositório real, integre em uma branch própria com `--branch` e revise antes de juntar ou publicar.
 
@@ -37,9 +37,34 @@ A instalação cria os comandos `contracanto` (CLI) e `contracanto-mcp` (servido
 
 2. Escolha o repositório a orquestrar com `--repo CAMINHO_DO_PROJETO` na CLI ou com a variável `CONTRACANTO_REPO` no ambiente do servidor MCP; sem eles, vale o diretório atual. O caminho precisa ser **a raiz** de um repositório Git, com uma branch em uso (HEAD destacado é recusado, salvo com `--branch`) e sem alterações pendentes. Um subdiretório do repositório é recusado.
 3. O estado das execuções fica em `.agent-runs/` dentro desse repositório, que precisa ignorar o diretório para continuar limpo: acrescente `.agent-runs/` ao `.gitignore` ou a `.git/info/exclude`. Os worktrees das tarefas ficam fora do repositório, em `%LOCALAPPDATA%\Contracanto\worktrees\<repositório>-<hash>\` no Windows e em `~/.cache/Contracanto/worktrees/` (ou sob `$XDG_CACHE_HOME`) nos demais sistemas, para que test runners, linters e `tsc` com globs amplos não enxerguem as cópias. `CONTRACANTO_WORKTREES_DIR` escolhe outra pasta. Se a saída do teste de integração citar caminhos em `.agent-runs/`, por exemplo worktrees de execuções anteriores a essa mudança, o erro da tarefa e o campo `warning` do status avisam; exclua o diretório dos globs e limpe os registros antigos com `--prune-runs`.
-4. O executor e todas as correções passam explicitamente `--mode auto --sandbox` ao Antigravity, sem `--dangerously-skip-permissions`. Configure uma allowlist limitada no CLI antes de operar. Comandos negados devem ser autorizados de forma granular; não desative o sandbox para contornar a falha. O modo headless pode negar comandos não autorizados. Configure permissões granulares conforme docs: https://antigravity.google/docs/cli/headless/
+4. Com o Antigravity, o executor e todas as correções passam explicitamente `--mode auto --sandbox`, sem `--dangerously-skip-permissions`. Configure uma allowlist limitada no CLI antes de operar. Comandos negados devem ser autorizados de forma granular; não desative o sandbox para contornar a falha. O modo headless pode negar comandos não autorizados. Configure permissões granulares conforme docs: https://antigravity.google/docs/cli/headless/
 
 Sem instalar, `python -m contracanto` e `python -m contracanto.server` equivalem a `contracanto` e `contracanto-mcp`, desde que o diretório desta cópia esteja no `PYTHONPATH`. Para desenvolver o próprio Contracanto, instale-o no venv dele com `python -m pip install -e ".[dev]"`.
+
+## Executor Codex
+
+Com `CONTRACANTO_EXECUTOR=codex`, o Codex CLI implementa e corrige no lugar do `agy`. A revisão continua com o `claude`. Cada chamada roda assim:
+
+```text
+codex exec --json --sandbox workspace-write --ephemeral --ignore-user-config
+  -c approval_policy="never" [-c windows.sandbox="elevated"] [--model <modelo>] -C <worktree> -
+```
+
+O pedido vai pela entrada padrão.
+
+- **Configuração do usuário fica de fora.** `--ignore-user-config` deixa de fora plugins, skills e hooks do `~/.codex`, que numa medição quase dobraram o contexto da primeira chamada (de 64 mil para 118 mil tokens). O login continua valendo. A política de aprovação e, no Windows, o sandbox `elevated` vêm explícitos: sem o primeiro, todo comando do agente é recusado; sem o segundo, o worktree fica só para leitura.
+- **Sandbox `workspace-write`:** a rede fica bloqueada, e a escrita só é permitida no worktree e na pasta temporária (`%TEMP%`) do usuário.
+- **Instruções do projeto:** o Codex lê o `AGENTS.md` do worktree, e o pedido de implementação manda ler `AGENTS.md` e `GEMINI.md` quando existirem.
+- **Tokens e modelo:** os tokens vêm dos eventos `turn.completed`. O Codex não informa o modelo nem cada pedido ao modelo, então o modelo registrado é o de `CONTRACANTO_AGENT_MODEL`, e uma chamada acima do limite de contexto longo não é detectada.
+- **Cobrança:** com o login do ChatGPT, o uso sai do limite do plano. Deixe `CONTRACANTO_EXECUTOR_BILLING` em `plan` e use `api` só com login por chave de API.
+
+Exemplo de `env` no `.mcp.json`, com o caminho do executável no lugar de `<caminho>`:
+
+```json
+"CONTRACANTO_EXECUTOR": "codex",
+"CONTRACANTO_CODEX_PATH": "<caminho>/codex.exe",
+"CONTRACANTO_AGENT_MODEL": "gpt-6-luna"
+```
 
 ## Teste sem MCP
 Copie `examples/plan.example.json`, edite com tasks reais e arquivos autorizados e faça o primeiro teste em um repositório descartável. Exemplo, a partir da raiz do repositório:
@@ -62,7 +87,7 @@ contracanto plano.json --setup-json '[\"npm\",\"ci\"]' --test npm test
 
 O comando roda em cada worktree antes da implementação, com as mesmas permissões do comando de testes, e só pode criar arquivos ignorados pelo Git; se falhar ou deixar outros arquivos, a tarefa falha. O PowerShell 5.1 exige as aspas internas escapadas com `\"`, como no exemplo; no PowerShell 7 e no bash basta `'["npm","ci"]'`.
 
-Erros de uso e de preparação, como plano inexistente, repositório com alterações ou valor inválido em uma variável `CONTRACANTO_*`, saem em uma linha iniciada por `Erro:`, com código de saída diferente de zero. As opções de execução (`--test`, `--setup-json`, `--branch`, `--keep-worktrees`) são recusadas junto de `--status`, `--watch`, `--stop`, `--unlock` e `--prune-runs`. Pelo MCP, `submit_plan` e `resume_run` conferem o repositório antes de reservar a execução: alterações pendentes, HEAD destacado sem `branch` e nome de branch inválido ou já usado voltam como `Erro:` na própria chamada. Antes de reservar a execução, `submit_plan` e `resume_run` também conferem o ambiente, e o worker repete a conferência antes de chamar qualquer agente: `agy` e `claude` no PATH, o executável dos comandos de testes e de preparação e, com `CONTRACANTO_AGENT_MODEL` definido, se o modelo aparece em `agy models`. Se essa lista não puder ser obtida, a execução segue. No Windows, um script `.cmd` ou `.bat` encontrado no PATH, como `npm`, é chamado pelo caminho completo.
+Erros de uso e de preparação, como plano inexistente, repositório com alterações ou valor inválido em uma variável `CONTRACANTO_*`, saem em uma linha iniciada por `Erro:`, com código de saída diferente de zero. As opções de execução (`--test`, `--setup-json`, `--branch`, `--keep-worktrees`) são recusadas junto de `--status`, `--watch`, `--stop`, `--unlock` e `--prune-runs`. Pelo MCP, `submit_plan` e `resume_run` conferem o repositório antes de reservar a execução: alterações pendentes, HEAD destacado sem `branch` e nome de branch inválido ou já usado voltam como `Erro:` na própria chamada. Antes de reservar a execução, `submit_plan` e `resume_run` também conferem o ambiente, e o worker repete a conferência antes de chamar qualquer agente: o executável do executor (`agy`, ou `CONTRACANTO_CODEX_PATH` com o Codex) e o `claude` no PATH, o executável dos comandos de testes e de preparação e, com o `agy` e `CONTRACANTO_AGENT_MODEL` definido, se o modelo aparece em `agy models`. Se essa lista não puder ser obtida, a execução segue. No Windows, um script `.cmd` ou `.bat` encontrado no PATH, como `npm`, é chamado pelo caminho completo.
 
 ## Operação pela linha de comando
 
@@ -91,7 +116,9 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_REVIEW_TIMEOUT` | 900 | Segundos para cada chamada ao revisor |
 | `CONTRACANTO_GIT_TIMEOUT` | 180 | Segundos para cada comando Git |
 | `CONTRACANTO_REVIEW_MODEL` | `sonnet` | Modelo usado pelo revisor |
-| `CONTRACANTO_AGENT_MODEL` | sem valor | Modelo do executor, passado ao `agy` em `--model` (ids em `agy models`, por exemplo `gemini-4-hydrogen-high`); sem valor, vale o padrão do `agy` |
+| `CONTRACANTO_EXECUTOR` | `agy` | CLI que implementa e corrige: `agy` (Antigravity) ou `codex` (Codex CLI); veja [Executor Codex](#executor-codex) |
+| `CONTRACANTO_CODEX_PATH` | `codex` | Executável do Codex; prefira o caminho completo, porque o servidor MCP herda o PATH de quando o app foi aberto |
+| `CONTRACANTO_AGENT_MODEL` | sem valor | Modelo do executor, passado em `--model` (no `agy`, ids em `agy models`, por exemplo `gemini-4-hydrogen-high`; no Codex, por exemplo `gpt-6-luna`); sem valor, vale o padrão do CLI |
 | `CONTRACANTO_AGENT_RETRIES` | 1 | Novas chamadas ao `agy` quando uma implementação ou correção falha (0 a 3) |
 | `CONTRACANTO_AUTO_RESUME` | 1 | Vezes que `wait_for_run` relança sozinho uma execução cujo worker morreu (0 a 3; 0 desliga) |
 | `CONTRACANTO_WORKTREES_DIR` | cache local | Pasta onde ficam os worktrees das tarefas, separada por repositório; mantenha-a fora do repositório orquestrado |
@@ -207,7 +234,7 @@ Peça ao Claude na aba Code:
 - Se o worker morrer sem registrar o estado final (processo encerrado, máquina reiniciada), `wait_for_run` libera a reserva e relança sozinho as tarefas que faltavam, com as mesmas opções, até `CONTRACANTO_AUTO_RESUME` vezes. Ele só faz isso com o repositório limpo, sem operação Git pendente e sem commit de tarefa não aprovada no histórico; caso contrário, `auto_resume.error` no resumo diz o motivo e a recuperação é manual. Pela CLI, `--resume` também libera sozinho a reserva de um worker morto. Uma execução que terminou pedindo recuperação manual nunca é retomada automaticamente.
 - Não há limitação de custos/tokens, isolamento forte de execução nem fila transacional. Os comandos de testes e de preparação rodam com as suas permissões: fixe-os com `CONTRACANTO_TEST_COMMAND` e `CONTRACANTO_SETUP_COMMAND` antes de usar em um repositório real.
 - Scripts usam revisão por modelo e não garantem correção ou segurança. Execute testes e auditoria adicionais antes de merge de produção.
-- Manter `agy` e `claude` no PATH do processo MCP e ter autenticação ativa é obrigatório.
+- Manter o executor (`agy`, ou o Codex em `CONTRACANTO_CODEX_PATH`) e o `claude` no PATH do processo MCP, com autenticação ativa, é obrigatório.
 
 ## Estado e recuperação
 
@@ -231,7 +258,7 @@ Instalado, o pacote oferece os comandos `contracanto` e `contracanto-mcp`. `exam
 | `process.py` | Execução de comandos com contenção da árvore de subprocessos |
 | `windows_job.py` | Job Object usado pela contenção no Windows |
 | `gitops.py` | Consultas e verificações Git: limpeza, escopo, branch e HEAD |
-| `agents.py` | Chamadas ao `agy` (implementação e correção) e ao `claude` (revisão) |
+| `agents.py` | Chamadas ao executor, `agy` ou `codex` (implementação e correção), e ao `claude` (revisão) |
 | `runner.py` | Ciclo da execução: lotes, revisão, integração e rollback |
 | `maintenance.py` | Consulta de status, destravamento da reserva, retomada e poda de execuções |
 | `server.py` | Ferramentas MCP e lançamento do worker |

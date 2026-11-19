@@ -7,6 +7,7 @@ import dataclasses
 import json
 import logging
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -24,7 +25,7 @@ log = logging.getLogger('contracanto')
 
 IMPLEMENT_PROMPT = (
     'Você está implementando UMA tarefa no Git worktree atual. '
-    'Leia GEMINI.md quando presente. Preserve a branch atual. '
+    'Leia AGENTS.md e GEMINI.md quando presentes. Preserve a branch atual. '
     'Não altere a arquitetura além do que a tarefa pede. Não faça commit/push/deploy. '
     'Não acesse segredos. NÃO altere arquivos fora da lista files. '
     'Se houver conflito de escopo, reporte sem implementar. '
@@ -241,6 +242,110 @@ def run_agy(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
     return parse_agy_output(result.stdout)
 
 
+def codex_command(wt: str | Path) -> list[str]:
+    """Argumentos do `codex exec`, sem a configuração do usuário e sem rede.
+
+    `--ignore-user-config` deixa de fora plugins, skills e hooks do `~/.codex`, que quase
+    dobravam o contexto, mas também a política de aprovação e o sandbox do Windows: sem
+    `approval_policy="never"` todo comando é recusado, e sem `windows.sandbox="elevated"` o
+    worktree fica somente leitura. O login continua valendo.
+    """
+    args = [
+        config.CODEX_PATH,
+        'exec',
+        '--json',
+        '--sandbox',
+        'workspace-write',
+        '--ephemeral',
+        '--ignore-user-config',
+        '-c',
+        'approval_policy="never"',
+    ]
+    if sys.platform == 'win32':
+        args += ['-c', 'windows.sandbox="elevated"']
+    if config.AGENT_MODEL:
+        args += ['--model', config.AGENT_MODEL]
+    return [*args, '-C', str(wt), '-']
+
+
+def _codex_failure(events: list[dict[str, Any]]) -> str | None:
+    for event in reversed(events):
+        if event.get('type') == 'turn.failed':
+            return str((event.get('error') or {}).get('message') or 'turn.failed')
+        if event.get('type') == 'error':
+            return str(event.get('message') or 'error')
+    return None
+
+
+def _codex_events(stdout: str) -> list[dict[str, Any]]:
+    events = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            raise tag(RuntimeError(f'Codex: linha que não é JSON na saída: {line[:200]}'), 'executor_error') from None
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def parse_codex_output(stdout: str) -> str:
+    """Relatório do Codex: a última mensagem do agente no turno concluído."""
+    events = _codex_events(stdout)
+    if any(event.get('type') == 'turn.failed' for event in events):
+        raise tag(RuntimeError(f'Codex: {_codex_failure(events)}'), 'executor_error')
+    if not any(event.get('type') == 'turn.completed' for event in events):
+        # Um evento `error` antes de um turno concluído é aviso; sem o turno, é a causa.
+        reason = _codex_failure(events) or 'saída sem turn.completed'
+        raise tag(RuntimeError(f'Codex não concluiu o turno: {reason}'), 'executor_error')
+    messages = [
+        str(event['item'].get('text') or '')
+        for event in events
+        if event.get('type') == 'item.completed'
+        and isinstance(event.get('item'), dict)
+        and event['item'].get('type') == 'agent_message'
+    ]
+    return messages[-1] if messages else ''
+
+
+def run_codex(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
+    result = process.run(
+        codex_command(wt),
+        cwd=wt,
+        timeout=config.AGENT_TIMEOUT,
+        input_data=prompt,
+        stop=stop,
+        check=False,
+        idle=idle_watch(wt),
+    )
+    if warning := result.stderr.strip():
+        # Comandos recusados pelo sandbox e erros de ferramenta aparecem só no stderr.
+        log.info('stderr do codex: %s', warning[-config.ERROR_TAIL :])
+    usage.record('executor', usage.from_codex(result.stdout, config.AGENT_MODEL))
+    if result.returncode:
+        try:
+            detail = _codex_failure(_codex_events(result.stdout))
+        except RuntimeError:
+            detail = None
+        message = f'codex terminou com código {result.returncode}: {detail or result.stderr[-config.ERROR_TAIL :]}'
+        raise tag(RuntimeError(message), 'executor_error')
+    return parse_codex_output(result.stdout)
+
+
+def run_agent(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
+    """Chama o executor configurado em CONTRACANTO_EXECUTOR."""
+    if config.EXECUTOR == 'codex':
+        return run_codex(prompt, wt, stop)
+    return run_agy(prompt, wt, stop)
+
+
+def executor_cli() -> str:
+    """Executável que a pré-checagem procura para o executor configurado."""
+    return config.CODEX_PATH if config.EXECUTOR == 'codex' else 'agy'
+
+
 # Modelos do agy por instante da consulta; `agy models` consulta a rede, então a lista é reaproveitada.
 _models: tuple[float, frozenset[str]] | None = None
 MODELS_CACHE_SECONDS = 600
@@ -266,9 +371,12 @@ def available_models() -> frozenset[str] | None:
 
 
 def check_model() -> None:
-    """Recusa um CONTRACANTO_AGENT_MODEL que o agy não oferece; sem a lista, não bloqueia."""
+    """Recusa um CONTRACANTO_AGENT_MODEL que o agy não oferece; sem a lista, não bloqueia.
+
+    O Codex não lista modelos; um nome errado aparece no erro da primeira chamada.
+    """
     model = config.AGENT_MODEL
-    if not model:
+    if not model or config.EXECUTOR != 'agy':
         return
     models = available_models()
     if models is not None and model not in models:
@@ -307,15 +415,15 @@ def prepare_worktree(ctx: RunContext, wt: Path, base: str, branch: str) -> None:
 
 
 def call_agent(ctx: RunContext, task: Task, prompt: str, wt: Path, expected_head: str, branch: str | None) -> str:
-    """Chama o agy e repete a chamada quando ela falha sem deixar o estado incerto."""
+    """Chama o executor e repete a chamada quando ela falha sem deixar o estado incerto."""
     for attempt in range(config.AGENT_RETRIES + 1):
         try:
-            return run_agy(prompt, wt, ctx.stop)
+            return run_agent(prompt, wt, ctx.stop)
         except (RecoveryRequired, RunCancelled):
             raise
         except (RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             if attempt == config.AGENT_RETRIES:
-                # Um erro do agy sem categoria própria, como uma saída com código diferente de zero.
+                # Um erro do executor sem categoria própria, como uma saída com código diferente de zero.
                 if not isinstance(error, subprocess.TimeoutExpired):
                     tag(error, 'executor_error')
                 raise
@@ -323,8 +431,9 @@ def call_agent(ctx: RunContext, task: Task, prompt: str, wt: Path, expected_head
             # branch e o commit do worktree continuem os esperados.
             gitops.check_checkout(wt, expected_head, branch)
             log.info(
-                '%s: chamada ao agy falhou (%s); nova tentativa %d de %d',
+                '%s: chamada ao %s falhou (%s); nova tentativa %d de %d',
                 task['id'],
+                config.EXECUTOR,
                 describe(error).splitlines()[0][:200],
                 attempt + 1,
                 config.AGENT_RETRIES,
@@ -377,7 +486,7 @@ def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifa
     gitops.check_checkout(wt, base, branch)
     gitops.check_scope(task, wt, base)
     if not gitops.changed_files(wt):
-        # O relatório costuma explicar a recusa; sem ele, o motivo fica só no log do agy.
+        # O relatório costuma explicar a recusa; sem ele, o motivo fica só no log do executor.
         message = f'O executor não alterou arquivos em {task["id"]}. Relatório do executor:\n' + (
             report.strip()[-config.ERROR_TAIL :] or '(vazio)'
         )

@@ -52,11 +52,11 @@ Além de `state`, `run_id`, `statuses`, `details`, `recovery_required` e `error`
 - `reasoning`: a parte de `output` gasta em raciocínio;
 - `calls`: número de chamadas medidas.
 
-Os números vêm do próprio CLI: do evento `result` do `agy` e do campo `usage` do `claude -p`. Uma saída sem contagem não registra nada e não faz a chamada falhar, então uma fase sem `tokens` não significa zero tokens.
+Os números vêm do próprio CLI: do evento `result` do `agy`, dos eventos `turn.completed` do `codex exec` e do campo `usage` do `claude -p`. Uma saída sem contagem não registra nada e não faz a chamada falhar, então uma fase sem `tokens` não significa zero tokens.
 
 ### Custo
 
-O custo é calculado por chamada, com o modelo que a própria saída do CLI informa (o evento `init` do `agy`, ou `CONTRACANTO_AGENT_MODEL` sem ele, e o `modelUsage` do `claude -p`). Cada fase soma `cost_usd`, `unpriced_calls` (chamadas sem preço) e `long_context_calls` (chamadas cobradas como contexto longo). Os mesmos campos aparecem em cada papel de `usage`.
+O custo é calculado por chamada, com o modelo que a própria saída do CLI informa: o evento `init` do `agy`, ou `CONTRACANTO_AGENT_MODEL` sem ele (sempre, com o Codex), e o `modelUsage` do `claude -p`. Cada fase soma `cost_usd`, `unpriced_calls` (chamadas sem preço) e `long_context_calls` (chamadas cobradas como contexto longo). Os mesmos campos aparecem em cada papel de `usage`.
 
 O preço vem de `CONTRACANTO_PRICES_JSON`, um objeto com um preço por modelo, em dólares por milhão de tokens. `long_context` é opcional:
 

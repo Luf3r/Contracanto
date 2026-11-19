@@ -184,6 +184,13 @@ A F1 precisa normalizar os três para um formato único: `input` sem cache, `cac
 
 **Pronto quando:** `CONTRACANTO_EXECUTOR=codex` rodar uma tarefa de exemplo (`examples/smoke_check.py`) até `approved`, com tokens e custo no `status.json`.
 
+**Situação (19/11/2026): implementada.** Diferenças em relação ao desenho acima:
+
+- **Sem protocolo `Executor`:** `agents.run_agent` escolhe entre `run_agy` e `run_codex` pela configuração. Assim, os testes que simulam `run_agy` continuam valendo.
+- **Tokens do Codex:** `usage.from_codex` soma os turnos. O modelo vem de `CONTRACANTO_AGENT_MODEL`, e não há pico por pedido, então o contexto longo não é detectado.
+- **Compactação antes de 272 mil tokens:** não foi configurada. A chave do Codex não foi verificada, e `--ignore-user-config` ignoraria uma configuração do usuário.
+- **Pré-checagem:** procura `CONTRACANTO_CODEX_PATH` e não consulta `agy models` com o Codex.
+
 ## F6: regras para o arquiteto dimensionar tarefas
 
 Itens a incluir no `CLAUDE.md` do Contracanto:

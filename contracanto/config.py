@@ -111,7 +111,12 @@ STOP_POLL_INTERVAL = 0.25
 # O limite interno do agy fica abaixo de AGENT_TIMEOUT para que ele reporte o próprio timeout.
 AGENT_PRINT_TIMEOUT = f'{int(AGENT_TIMEOUT - 100) // 60}m'
 REVIEW_MODEL = _text('REVIEW_MODEL', 'sonnet')
-# Modelo do executor, passado ao agy em --model; vazio deixa o padrão do agy (veja `agy models`).
+# CLI que implementa e corrige: `agy` (Antigravity) ou `codex` (Codex CLI da OpenAI).
+EXECUTORS = ('agy', 'codex')
+EXECUTOR = _choice('EXECUTOR', 'agy', EXECUTORS)
+# Executável do Codex; um caminho completo evita depender do PATH herdado pelo servidor MCP.
+CODEX_PATH = _text('CODEX_PATH', 'codex')
+# Modelo do executor, passado em --model; vazio deixa o padrão do CLI (veja `agy models`).
 AGENT_MODEL = _text('AGENT_MODEL', '')
 # Novas chamadas ao agy quando uma implementação ou correção falha sem deixar o worktree
 # em estado incerto.
@@ -154,6 +159,8 @@ TUNABLE = (
     'REVIEW_TIMEOUT',
     'REVIEW_MODEL',
     'AGENT_MODEL',
+    'EXECUTOR',
+    'CODEX_PATH',
     'AGENT_RETRIES',
     'AUTO_RESUME',
     'REVIEW_PATCH_LIMIT',

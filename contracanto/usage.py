@@ -129,6 +129,44 @@ def from_claude(stdout: str) -> Usage | None:
         return None
 
 
+def from_codex(stdout: str, model: str = '') -> Usage | None:
+    """Uso dos eventos `turn.completed` do `codex exec --json`, somados entre os turnos.
+
+    O Codex conta o cache dentro de `input_tokens` e o raciocínio dentro de `output_tokens`, e
+    não informa os pedidos um a um nem o modelo, que vem da configuração.
+    """
+    total: Usage | None = None
+    try:
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict) or event.get('type') != 'turn.completed':
+                continue
+            data = event.get('usage')
+            if not isinstance(data, dict):
+                continue
+            cached = _count(data, 'cached_input_tokens')
+            turn = Usage(
+                input=max(_count(data, 'input_tokens') - cached, 0),
+                cached_input=cached,
+                cache_write=_count(data, 'cache_write_input_tokens'),
+                output=_count(data, 'output_tokens'),
+                reasoning=_count(data, 'reasoning_output_tokens'),
+                model=model,
+            )
+            total = turn if total is None else _combine(total, turn)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return total
+
+
+def _combine(first: Usage, second: Usage) -> Usage:
+    """Uma chamada só com os turnos somados: os contadores se somam, o resto fica do primeiro."""
+    summed = {name: getattr(first, name) + getattr(second, name) for name in FIELDS if name != 'calls'}
+    return Usage(**summed, calls=first.calls, model=first.model, peak_input=max(first.peak_input, second.peak_input))
+
+
 Sink = Callable[[Role, Usage], None]
 _sink: contextvars.ContextVar[Sink | None] = contextvars.ContextVar('contracanto_usage_sink', default=None)
 

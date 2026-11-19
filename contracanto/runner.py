@@ -72,11 +72,12 @@ def preflight(root: Path, tests: Sequence[str], setup: Sequence[str] | None) -> 
     """Confere o ambiente antes de qualquer tarefa e devolve os comandos resolvidos.
 
     Vale para o worker, logo antes de começar, e para a submissão pelo MCP, que assim recusa
-    antes de reservar a execução: os CLIs no PATH, o modelo do executor na lista do agy e o
+    antes de reservar a execução: os CLIs no PATH (o do executor configurado e o claude), o
+    modelo do executor na lista do agy e o
     executável dos comandos de testes e de preparação. O Git é conferido antes, por
     check_repository.
     """
-    missing = [name for name in ('agy', 'claude') if not shutil.which(name)]
+    missing = [name for name in (agents.executor_cli(), 'claude') if not shutil.which(name)]
     if missing:
         message = f'Não encontrado no PATH: {", ".join(missing)}. Instale, autentique e reinicie o servidor MCP'
         raise tag(RuntimeError(message), 'tooling')
