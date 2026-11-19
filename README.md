@@ -207,7 +207,7 @@ Peça ao Claude na aba Code:
 
 ## Estado e recuperação
 
-- Cada execução registra `status.json`, `plan.json`, `options.json` (as opções com que foi iniciada, usadas na retomada automática) e, quando iniciada pelo MCP, `run.log` e `pid.txt` em `.agent-runs/runs/<run_id>/`. `get_run_status()` e `--status` devolvem esse estado como JSON, com horários de início e fim e o tempo gasto por tarefa em cada fase.
+- Cada execução registra `status.json`, `plan.json`, `options.json` (as opções com que foi iniciada, usadas na retomada automática) e, quando iniciada pelo MCP, `run.log` e `pid.txt` em `.agent-runs/runs/<run_id>/`. `get_run_status()` e `--status` devolvem esse estado como JSON, com horários de início e fim, o tempo gasto por tarefa em cada fase e, quando os CLIs informam, os tokens de cada fase e o total por papel (executor e revisor); veja [docs/recuperacao.md](docs/recuperacao.md).
 - O worker registra cada evento da execução, com a hora: lotes, mudanças de estado das tarefas, início e fim de cada fase, vereditos, commits aplicados e erros. Pela CLI os eventos saem na saída de erro; pelo MCP ficam em `run.log`, cujo final aparece em `get_run_status()`.
 - Para encerrar a execução ativa, chame `stop_run()` ou execute `contracanto --stop`.
 - CLI e MCP compartilham a reserva `.agent-runs/run.lock`. Quando o estado do Git ou dos subprocessos fica incerto, `recovery_required: true` mantém a reserva até a inspeção manual; depois dela, `--unlock` libera a reserva.
@@ -239,7 +239,7 @@ Nenhum módulo guarda estado global: o repositório e o diretório de execuçõe
 
 `pyproject.toml` é a única declaração das dependências diretas (`mcp` e, no Windows, `pywin32`) e das ferramentas de desenvolvimento (`ruff` e `mypy`, no extra `dev`), além do pacote e de seus comandos. `requirements.lock.txt` fixa também as transitivas do ambiente validado; use-o na instalação e na CI. Para desenvolver, instale o lock e depois `python -m pip install -e ".[dev]"`. A CI confere com `scripts/check_lock.py` que o lock fixa as mesmas versões declaradas em `pyproject.toml` e executa `ruff check .`, `ruff format --check .` e `mypy` além dos testes, pelo executor paralelo. O `mypy` confere o pacote, `scripts/` e `tests/`. A versão do pacote fica em `contracanto/__init__.py`. Atualizações devem ser intencionais: regenere as versões em ambiente limpo, execute `pip check`, a suíte completa e o smoke em cópia descartável. O workflow não chama modelos nem valida autenticação.
 
-A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Orçamento de tokens/custo continua fora do escopo. A retomada automática cobre o worker que morre com o repositório íntegro; quando o Git ou os subprocessos ficam em estado incerto, a reserva e a recuperação manual continuam obrigatórias.
+A autenticação no aplicativo Claude e a execução real com os modelos devem ser verificadas na máquina do operador. Os tokens são registrados, mas não há orçamento nem limite de tokens ou de custo. A retomada automática cobre o worker que morre com o repositório íntegro; quando o Git ou os subprocessos ficam em estado incerto, a reserva e a recuperação manual continuam obrigatórias.
 
 ## Licença
 

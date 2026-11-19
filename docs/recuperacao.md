@@ -38,7 +38,19 @@ Além de `state`, `run_id`, `statuses`, `details`, `recovery_required` e `error`
 - `started_at`, `updated_at` e `finished_at`: horários em ISO 8601, UTC; `finished_at` é `null` até o estado final.
 - `duration_seconds`: duração da execução até a última gravação ou até o estado final.
 - `target`: a `branch` de destino (ref completa) e o commit `base` sobre o qual a execução começou; ausente quando a preparação falha antes disso. `branch_removed: true` indica que a branch de integração terminou vazia e foi apagada.
-- `timings.<id>`: `started_at` e `finished_at` da tarefa e, em `phases`, os segundos acumulados e o número de vezes de cada fase (`implementation`, `review`, `repair`, `integration`). Uma tarefa bloqueada antes de começar não tem `started_at`.
+- `timings.<id>`: `started_at` e `finished_at` da tarefa e, em `phases`, os segundos acumulados e o número de vezes de cada fase (`implementation`, `review`, `repair`, `integration`). Uma tarefa bloqueada antes de começar não tem `started_at`. Quando o CLI chamado na fase informa tokens, a fase também traz `tokens`, descrito abaixo.
+- `usage`: os tokens somados da execução por papel, em `executor` (implementação e correções) e `reviewer` (revisões). O campo só aparece depois da primeira chamada medida.
+
+`tokens` e cada papel de `usage` têm o mesmo formato, com os campos somados entre todas as chamadas, inclusive as que falharam e as novas tentativas:
+
+- `input`: entrada sem cache;
+- `cached_input`: entrada lida do cache;
+- `cache_write`: entrada gravada no cache;
+- `output`: tudo o que o modelo gerou, inclusive o raciocínio;
+- `reasoning`: a parte de `output` gasta em raciocínio;
+- `calls`: número de chamadas medidas.
+
+Os números vêm do próprio CLI: do evento `result` do `agy` e do campo `usage` do `claude -p`. Uma saída sem contagem não registra nada e não faz a chamada falhar, então uma fase sem `tokens` não significa zero tokens.
 
 ### Detalhes de cada tarefa
 

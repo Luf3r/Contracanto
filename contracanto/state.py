@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from . import config
+from . import config, usage
 from .errors import RecoveryRequired, RunCancelled
 
 RunStatus = Literal['starting', 'running', 'completed', 'failed', 'cancelled']
@@ -214,6 +214,8 @@ class RunState:
         self.statuses: dict[str, TaskStatus] = {}
         self.details: dict[str, dict[str, Any]] = {}
         self.timings: dict[str, dict[str, Any]] = {}
+        # Tokens somados por papel (executor, revisor), além dos de cada fase em `timings`.
+        self.usage: dict[str, dict[str, int]] = {}
         self.recovery_required = False
         self.error: str | None = None
         # Branch de destino e commit sobre o qual a execução começou.
@@ -238,6 +240,8 @@ class RunState:
                 'timings': self.timings,
                 'recovery_required': self.recovery_required,
             }
+            if self.usage:
+                data['usage'] = self.usage
             if self.error is not None:
                 data['error'] = self.error
             if self.target is not None:
@@ -277,19 +281,35 @@ class RunState:
         with self._lock:
             self.details[task_id] = fields
 
+    def _phase_entry(self, task_id: str, name: Phase) -> dict[str, Any]:
+        phases = self.timings.setdefault(task_id, {'phases': {}})['phases']
+        entry: dict[str, Any] = phases.setdefault(name, {'seconds': 0.0, 'count': 0})
+        return entry
+
+    def add_usage(self, task_id: str, name: Phase, role: usage.Role, used: usage.Usage) -> None:
+        """Soma os tokens de uma chamada à fase da tarefa e ao total do papel."""
+        with self._lock:
+            entry = self._phase_entry(task_id, name)
+            entry['tokens'] = usage.add(entry.get('tokens'), used)
+            self.usage[role] = usage.add(self.usage.get(role), used)
+
     @contextlib.contextmanager
     def phase(self, task_id: str, name: Phase) -> Iterator[None]:
-        """Acumula o tempo gasto em uma fase da tarefa, mesmo quando ela falha."""
+        """Acumula o tempo e os tokens gastos em uma fase da tarefa, mesmo quando ela falha."""
         started = time.monotonic()
         log.info('%s: início de %s', task_id, name)
+
+        def sink(role: usage.Role, used: usage.Usage) -> None:
+            self.add_usage(task_id, name, role, used)
+
         try:
-            yield
+            with usage.collecting(sink):
+                yield
         finally:
             elapsed = time.monotonic() - started
             log.info('%s: fim de %s após %.1fs', task_id, name, elapsed)
             with self._lock:
-                phases = self.timings.setdefault(task_id, {'phases': {}})['phases']
-                entry = phases.setdefault(name, {'seconds': 0.0, 'count': 0})
+                entry = self._phase_entry(task_id, name)
                 entry['seconds'] = round(entry['seconds'] + elapsed, 1)
                 entry['count'] += 1
 

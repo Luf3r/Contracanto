@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import config, gitops, process
+from . import config, gitops, process, usage
 from .errors import RecoveryRequired, RunCancelled, describe
 from .plan import Task
 from .state import RunContext, StopSignal
@@ -176,6 +176,8 @@ def run_agy(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
         input_data=payload,
         stop=stop,
     )
+    # Registrado antes do parsing: uma chamada que termina com erro também gastou tokens.
+    usage.record('executor', usage.from_agy(result.stdout))
     return parse_agy_output(result.stdout)
 
 
@@ -393,6 +395,7 @@ def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | N
             input_data=prompt,
             stop=stop,
         )
+    usage.record('reviewer', usage.from_claude(response.stdout))
     verdict = parse_verdict(parse_claude_output(response.stdout))
     feedback = verdict.text
     if test.returncode:
