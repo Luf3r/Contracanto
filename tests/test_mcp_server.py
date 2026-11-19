@@ -25,6 +25,13 @@ def status_report():
 
 
 class SubmissionTests(unittest.TestCase):
+    def setUp(self):
+        # Estes testes tratam da reserva e do lançamento; a preflight da submissão, que exige os
+        # CLIs no PATH, tem testes próprios em SubmissionPreflightTests e test_preflight_and_idle.
+        patcher = patch.object(server, 'preflight', return_value=(['test'], None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_submit_schema_requires_test_command(self):
         tool = server.mcp._tool_manager.get_tool('submit_plan')
         assert tool is not None
