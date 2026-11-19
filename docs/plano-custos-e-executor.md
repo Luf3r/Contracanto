@@ -157,6 +157,14 @@ A F1 precisa normalizar os três para um formato único: `input` sem cache, `cac
 
 **Pronto quando:** um executor falso que dorme sem escrever for encerrado após o `idle_timeout`, um executável ausente for recusado no `submit_plan`, e um worker que morre deixar a causa no `status.json`.
 
+**Situação (19/11/2026): implementada.** Diferenças em relação ao desenho acima:
+
+- **Logs do worker:** o stderr do worker já ia para o `run.log`. As execuções que morreram em 1–2 s não têm traceback: foram encerradas de fora, no meio da implementação, antes de o worker passar a rodar fora do Job Object do app. Por isso, em vez de um `worker.err`, a liberação da reserva grava o último evento do log no `error`.
+- **`[WinError 2]` do c1b9:** já tinha sido corrigido pelo `ec50a13`, porque a base rodava o comando de testes sem resolver o `.cmd` do npm.
+- **Pré-checagem:** é uma função só (`runner.preflight`), usada pelo worker e pelo `_launch` do MCP, que cobre submissão, retomada e retomada automática. O modelo é conferido em `agy models`, com cache de 10 min; se a lista falhar, a execução não é bloqueada.
+- **Watchdog:** com ele ligado, o `process.run` grava a saída em um arquivo temporário e mede o crescimento dela, junto com o estado do worktree (arquivos alterados, tamanho e horário).
+- **Stderr do `agy`:** vai para o `run.log`, o que mostra avisos como o do `--mode auto`.
+
 ## F5: executor plugável e GPT-6 Luna
 
 - `config.py`: `CONTRACANTO_EXECUTOR` aceita `agy` (padrão, o comportamento atual) ou `codex`. `CONTRACANTO_AGENT_MODEL` continua valendo para os dois.

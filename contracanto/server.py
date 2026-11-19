@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import config, gitops, maintenance, process, state
 from .plan import parse_command, validate
-from .runner import check_repository
+from .runner import check_repository, preflight
 
 mcp = FastMCP('Contracanto')
 WORKSPACE = state.default_workspace()
@@ -162,6 +162,7 @@ def _launch(
     try:
         # O worker confere de novo; aqui o erro chega a quem submeteu sem criar uma execução.
         check_repository(ws.root, branch.strip() or None)
+        preflight(ws.root, test, config.pinned_setup(setup))
         token = state.reserve_run(ws)
     except RuntimeError as error:
         return f'Erro: {error}'

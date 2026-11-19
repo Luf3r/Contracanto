@@ -14,6 +14,7 @@ FailureCategory = Literal[
     'executor_error',  # o executor terminou com erro ou com saída que não se entende
     'executor_noop',  # o executor terminou sem alterar arquivos
     'timeout',  # um comando passou do tempo limite
+    'stalled',  # o executor ficou sem progresso pelo tempo de AGENT_IDLE_TIMEOUT
     'scope',  # arquivo alterado fora da lista files
     'patch_too_large',  # o patch passa do limite de revisão
     'inherited_base',  # os testes já falhavam na base e continuam falhando

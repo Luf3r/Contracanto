@@ -10,7 +10,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,6 +23,26 @@ from .state import StopSignal
 # nul: caminhos Git delimitados por NUL; stdout precisa ser UTF-8 exato.
 # binary: stdout em bytes, sem tradução de quebras de linha.
 Output = Literal['text', 'nul', 'binary']
+
+
+@dataclass(frozen=True)
+class IdleWatch:
+    """Encerra o comando que passa `timeout` segundos sem progresso.
+
+    Progresso é a saída padrão crescer ou `probe` devolver outro valor, por exemplo o estado do
+    worktree que o comando altera. A conferência roda a cada `interval` segundos.
+    """
+
+    timeout: float
+    probe: Callable[[], Hashable] | None = None
+    interval: float = 30.0
+
+
+class Stalled(RuntimeError):
+    """O comando ficou sem progresso pelo tempo de IdleWatch e foi encerrado."""
+
+    contracanto_category = 'stalled'
+
 
 if sys.platform == 'win32':
     from .windows_job import WindowsJob
@@ -278,15 +299,38 @@ def _register(stop: StopSignal | None, pid: int) -> Path | None:
     return marker
 
 
-def _communicate(process: subprocess.Popen, input_data, timeout: float, stop: StopSignal | None, args):
-    if stop is None:
+def _communicate(
+    process: subprocess.Popen,
+    input_data,
+    timeout: float,
+    stop: StopSignal | None,
+    args,
+    idle: IdleWatch | None = None,
+    output_size: Callable[[], int] | None = None,
+):
+    if stop is None and idle is None:
         return process.communicate(input_data, timeout=timeout)
-    deadline = time.monotonic() + timeout
+    now = time.monotonic()
+    deadline = now + timeout
+    last_progress = next_check = now
+    signature: tuple[Any, ...] | None = None
     while True:
-        stop.check()
-        remaining = deadline - time.monotonic()
+        if stop is not None:
+            stop.check()
+        now = time.monotonic()
+        remaining = deadline - now
         if remaining <= 0:
             raise subprocess.TimeoutExpired(args, timeout)
+        if idle is not None and now >= next_check:
+            current = (output_size() if output_size else None, idle.probe() if idle.probe else None)
+            if current != signature:
+                signature, last_progress = current, now
+            elif now - last_progress >= idle.timeout:
+                raise Stalled(
+                    f'{args[0]} ficou {int(now - last_progress)}s sem progresso (sem saída nova nem alteração '
+                    f'de arquivos) e foi encerrado; ajuste {config.ENV_PREFIX}AGENT_IDLE_TIMEOUT se for esperado'
+                )
+            next_check = now + idle.interval
         try:
             return process.communicate(input_data, timeout=min(config.STOP_POLL_INTERVAL, remaining))
         except subprocess.TimeoutExpired:
@@ -303,11 +347,16 @@ def run(
     stop: StopSignal | None = None,
     output: Output = 'text',
     env_overrides: Mapping[str, str] | None = None,
+    idle: IdleWatch | None = None,
 ) -> subprocess.CompletedProcess:
     """Executa o comando e só retorna depois de encerrar todos os seus descendentes.
 
-    Com `stop`, o comando é interrompido quando o operador pede o encerramento.
+    Com `stop`, o comando é interrompido quando o operador pede o encerramento. Com `idle`,
+    quando fica sem progresso; a saída padrão vai então para um arquivo temporário, para que
+    o crescimento dela possa ser medido enquanto o comando roda (só com `output='text'`).
     """
+    if idle is not None and output != 'text':
+        raise ValueError('IdleWatch exige output text')
     env = dict(os.environ, PYTHONIOENCODING='utf-8')
     if env_overrides:
         env.update(env_overrides)
@@ -318,8 +367,14 @@ def run(
         process = None
         marker: Path | None = None
         stdin: Any = subprocess.PIPE
+        stdout_target: Any = subprocess.PIPE
+        stdout_file: Any = None
+        if idle is not None:
+            stdout_file = resources.enter_context(tempfile.TemporaryFile(mode='w+b'))
+            stdout_target = stdout_file
         if stop is not None:
             stop.check()
+        if stop is not None or idle is not None:
             # Pythons antigos no Windows escrevem a entrada do pipe de forma síncrona em
             # communicate. Um arquivo também permite repetir a espera enquanto o filho não a consumiu.
             stdin = subprocess.DEVNULL
@@ -333,7 +388,7 @@ def run(
                 args,
                 cwd=None if cwd is None else str(cwd),
                 stdin=stdin,
-                stdout=subprocess.PIPE,
+                stdout=stdout_target,
                 stderr=subprocess.PIPE,
                 encoding=None if raw else 'utf-8',
                 errors=None if raw else 'replace',
@@ -343,8 +398,12 @@ def run(
             resources.enter_context(process)
             marker = _register(stop, process.pid)
             containment.start(process)
-            stdout, stderr = _communicate(process, input_data, timeout, stop, args)
+            size = (lambda: os.fstat(stdout_file.fileno()).st_size) if stdout_file is not None else None
+            stdout, stderr = _communicate(process, input_data, timeout, stop, args, idle, size)
             containment.terminate()
+            if stdout_file is not None:
+                stdout_file.seek(0)
+                stdout = stdout_file.read().decode('utf-8', errors='replace')
         except (Exception, KeyboardInterrupt) as error:
             if process is None:
                 if isinstance(error, KeyboardInterrupt):

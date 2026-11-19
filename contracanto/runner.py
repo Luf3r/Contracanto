@@ -62,10 +62,28 @@ def resolve_command(command: Sequence[str], root: Path, label: str) -> list[str]
     if found is None:
         if (root / name).is_file():
             return list(command)
-        raise RuntimeError(f'{label} não encontrado: {name}. Confira o comando e o PATH do worker')
+        raise tag(RuntimeError(f'{label} não encontrado: {name}. Confira o comando e o PATH do worker'), 'tooling')
     if sys.platform == 'win32' and Path(found).suffix.lower() in ('.cmd', '.bat'):
         return [found, *command[1:]]
     return list(command)
+
+
+def preflight(root: Path, tests: Sequence[str], setup: Sequence[str] | None) -> tuple[list[str], list[str] | None]:
+    """Confere o ambiente antes de qualquer tarefa e devolve os comandos resolvidos.
+
+    Vale para o worker, logo antes de começar, e para a submissão pelo MCP, que assim recusa
+    antes de reservar a execução: os CLIs no PATH, o modelo do executor na lista do agy e o
+    executável dos comandos de testes e de preparação. O Git é conferido antes, por
+    check_repository.
+    """
+    missing = [name for name in ('agy', 'claude') if not shutil.which(name)]
+    if missing:
+        message = f'Não encontrado no PATH: {", ".join(missing)}. Instale, autentique e reinicie o servidor MCP'
+        raise tag(RuntimeError(message), 'tooling')
+    resolved_tests = resolve_command(tests, root, 'Comando de testes')
+    resolved_setup = resolve_command(setup, root, 'Comando de preparação') if setup else None
+    agents.check_model()
+    return resolved_tests, resolved_setup
 
 
 def check_repository(root: Path, branch: str | None = None) -> gitops.CheckoutState:
@@ -177,14 +195,10 @@ def _execute(
         raise RuntimeError('Configure um comando de testes via --test (obrigatório)')
     config.check_pinned(tests, ctx.setup)
     ctx.setup = config.pinned_setup(ctx.setup)
-    if not shutil.which('agy') or not shutil.which('claude'):
-        raise RuntimeError('Instale/autentique agy e claude; ambos devem estar no PATH')
-    tests = resolve_command(tests, ctx.root, 'Comando de testes')
+    tests, ctx.setup = preflight(ctx.root, tests, ctx.setup)
     # O teste da base roda o mesmo comando resolvido que a revisão e a integração; o cru
     # falha no Windows quando é um script .cmd, como npm.
     ctx.tests = tests
-    if ctx.setup:
-        ctx.setup = resolve_command(ctx.setup, ctx.root, 'Comando de preparação')
     origin = check_repository(ctx.root, ctx.branch)
     if ctx.branch:
         gitops.create_branch(ctx.root, ctx.branch)

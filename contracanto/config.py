@@ -39,6 +39,14 @@ def _seconds(name: str, default: float, minimum: float = 0) -> float:
     return value
 
 
+def _seconds_or_off(name: str, default: float) -> float:
+    """Segundos, ou 0 para desligar."""
+    raw = os.environ.get(ENV_PREFIX + name)
+    if raw is not None and raw.strip() in ('0', '0.0'):
+        return 0.0
+    return _seconds(name, default)
+
+
 def _count(name: str, default: int, allowed: range) -> int:
     raw = os.environ.get(ENV_PREFIX + name)
     if raw is None or not raw.strip():
@@ -91,6 +99,12 @@ TEST_TIMEOUT = _seconds('TEST_TIMEOUT', 600)
 SETUP_TIMEOUT = _seconds('SETUP_TIMEOUT', 600)
 AGENT_TIMEOUT = _seconds('AGENT_TIMEOUT', 1600, AGENT_TIMEOUT_MINIMUM)
 REVIEW_TIMEOUT = _seconds('REVIEW_TIMEOUT', 900)
+# Segundos sem saída nova do executor nem alteração no worktree até ele ser encerrado como
+# parado; 0 desliga. A conferência roda a cada IDLE_POLL_INTERVAL segundos.
+AGENT_IDLE_TIMEOUT = _seconds_or_off('AGENT_IDLE_TIMEOUT', 600)
+IDLE_POLL_INTERVAL = 30.0
+# Limite de `agy models`, consultado antes de cada execução quando AGENT_MODEL está definido.
+MODELS_TIMEOUT = 60
 PROCESS_EXIT_TIMEOUT = 30
 STOP_POLL_INTERVAL = 0.25
 
@@ -136,6 +150,7 @@ TUNABLE = (
     'TEST_TIMEOUT',
     'SETUP_TIMEOUT',
     'AGENT_TIMEOUT',
+    'AGENT_IDLE_TIMEOUT',
     'REVIEW_TIMEOUT',
     'REVIEW_MODEL',
     'AGENT_MODEL',

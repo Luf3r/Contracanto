@@ -62,7 +62,7 @@ contracanto plano.json --setup-json '[\"npm\",\"ci\"]' --test npm test
 
 O comando roda em cada worktree antes da implementação, com as mesmas permissões do comando de testes, e só pode criar arquivos ignorados pelo Git; se falhar ou deixar outros arquivos, a tarefa falha. O PowerShell 5.1 exige as aspas internas escapadas com `\"`, como no exemplo; no PowerShell 7 e no bash basta `'["npm","ci"]'`.
 
-Erros de uso e de preparação, como plano inexistente, repositório com alterações ou valor inválido em uma variável `CONTRACANTO_*`, saem em uma linha iniciada por `Erro:`, com código de saída diferente de zero. As opções de execução (`--test`, `--setup-json`, `--branch`, `--keep-worktrees`) são recusadas junto de `--status`, `--watch`, `--stop`, `--unlock` e `--prune-runs`. Pelo MCP, `submit_plan` e `resume_run` conferem o repositório antes de reservar a execução: alterações pendentes, HEAD destacado sem `branch` e nome de branch inválido ou já usado voltam como `Erro:` na própria chamada. Antes de chamar qualquer agente, o worker confere se os executáveis dos comandos de testes e de preparação existem. No Windows, um script `.cmd` ou `.bat` encontrado no PATH, como `npm`, é chamado pelo caminho completo.
+Erros de uso e de preparação, como plano inexistente, repositório com alterações ou valor inválido em uma variável `CONTRACANTO_*`, saem em uma linha iniciada por `Erro:`, com código de saída diferente de zero. As opções de execução (`--test`, `--setup-json`, `--branch`, `--keep-worktrees`) são recusadas junto de `--status`, `--watch`, `--stop`, `--unlock` e `--prune-runs`. Pelo MCP, `submit_plan` e `resume_run` conferem o repositório antes de reservar a execução: alterações pendentes, HEAD destacado sem `branch` e nome de branch inválido ou já usado voltam como `Erro:` na própria chamada. Antes de reservar a execução, `submit_plan` e `resume_run` também conferem o ambiente, e o worker repete a conferência antes de chamar qualquer agente: `agy` e `claude` no PATH, o executável dos comandos de testes e de preparação e, com `CONTRACANTO_AGENT_MODEL` definido, se o modelo aparece em `agy models`. Se essa lista não puder ser obtida, a execução segue. No Windows, um script `.cmd` ou `.bat` encontrado no PATH, como `npm`, é chamado pelo caminho completo.
 
 ## Operação pela linha de comando
 
@@ -87,6 +87,7 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_TEST_TIMEOUT` | 600 | Segundos para cada execução do comando de testes |
 | `CONTRACANTO_SETUP_TIMEOUT` | 600 | Segundos para o comando de preparação de cada worktree |
 | `CONTRACANTO_AGENT_TIMEOUT` | 1600 | Segundos para cada chamada ao `agy`; mínimo 160 |
+| `CONTRACANTO_AGENT_IDLE_TIMEOUT` | 600 | Segundos sem saída nova do `agy` nem alteração de arquivos no worktree até a chamada ser encerrada como parada (categoria `stalled`), contando como uma tentativa; `0` desliga |
 | `CONTRACANTO_REVIEW_TIMEOUT` | 900 | Segundos para cada chamada ao revisor |
 | `CONTRACANTO_GIT_TIMEOUT` | 180 | Segundos para cada comando Git |
 | `CONTRACANTO_REVIEW_MODEL` | `sonnet` | Modelo usado pelo revisor |

@@ -8,6 +8,7 @@ import json
 import logging
 import subprocess
 import tempfile
+import time
 import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -183,6 +184,29 @@ def parse_claude_output(stdout: str) -> str:
     return str(result)
 
 
+def worktree_signature(wt: str | Path) -> tuple[Any, ...]:
+    """Arquivos alterados no worktree, com tamanho e horário: muda sempre que o executor escreve."""
+    try:
+        entries = []
+        for name in gitops.changed_files(wt):
+            path = Path(wt) / name
+            info = path.stat() if path.exists() else None
+            entries.append((name, info.st_size if info else None, info.st_mtime_ns if info else None))
+        return tuple(entries)
+    except Exception as error:  # Uma consulta que falha não pode encerrar o executor por si só.
+        return ('erro', describe(error))
+
+
+def idle_watch(wt: str | Path) -> process.IdleWatch | None:
+    if not config.AGENT_IDLE_TIMEOUT:
+        return None
+    return process.IdleWatch(
+        config.AGENT_IDLE_TIMEOUT,
+        lambda: worktree_signature(wt),
+        min(config.IDLE_POLL_INTERVAL, config.AGENT_IDLE_TIMEOUT),
+    )
+
+
 def run_agy(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
     # NDJSON pela entrada padrão evita o limite da linha de comando do Windows, inclusive nas correções.
     payload = json.dumps({'event': 'user', 'message': {'content': prompt}}, ensure_ascii=False) + '\n'
@@ -204,13 +228,55 @@ def run_agy(prompt: str, wt: str | Path, stop: StopSignal | None = None) -> str:
         timeout=config.AGENT_TIMEOUT,
         input_data=payload,
         stop=stop,
+        idle=idle_watch(wt),
     )
+    if warning := result.stderr.strip():
+        # O agy avisa pelo stderr, por exemplo quando ignora uma opção que a conta não permite.
+        log.info('stderr do agy: %s', warning[-config.ERROR_TAIL :])
     # Registrado antes do parsing: uma chamada que termina com erro também gastou tokens.
     used = usage.from_agy(result.stdout)
     if used is not None and not used.model and config.AGENT_MODEL:
         used = dataclasses.replace(used, model=config.AGENT_MODEL)
     usage.record('executor', used)
     return parse_agy_output(result.stdout)
+
+
+# Modelos do agy por instante da consulta; `agy models` consulta a rede, então a lista é reaproveitada.
+_models: tuple[float, frozenset[str]] | None = None
+MODELS_CACHE_SECONDS = 600
+
+
+def available_models() -> frozenset[str] | None:
+    """Ids que `agy models` lista, ou None quando a lista não pôde ser obtida."""
+    global _models
+    if _models is not None and time.monotonic() - _models[0] < MODELS_CACHE_SECONDS:
+        return _models[1]
+    try:
+        result = process.run(['agy', 'models'], timeout=config.MODELS_TIMEOUT, check=False)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+    # Uma linha por modelo, no formato "id<TAB>nome"; as demais são mensagens de progresso.
+    ids = frozenset(line.split('\t', 1)[0].strip() for line in result.stdout.splitlines() if '\t' in line)
+    if not ids:
+        return None
+    _models = (time.monotonic(), ids)
+    return ids
+
+
+def check_model() -> None:
+    """Recusa um CONTRACANTO_AGENT_MODEL que o agy não oferece; sem a lista, não bloqueia."""
+    model = config.AGENT_MODEL
+    if not model:
+        return
+    models = available_models()
+    if models is not None and model not in models:
+        message = (
+            f'Modelo do executor {model!r} não está em `agy models`; '
+            f'ajuste {config.ENV_PREFIX}AGENT_MODEL. Disponíveis: {", ".join(sorted(models))}'
+        )
+        raise tag(RuntimeError(message), 'tooling')
 
 
 def make_worktree(ctx: RunContext, task: Task, base: str) -> Path:

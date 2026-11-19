@@ -208,7 +208,11 @@ def unlock(ws: Workspace) -> str:
             if current.get('state') not in state.TERMINAL_STATES:
                 current['state'] = 'failed'
                 current['finished_at'] = state.now()
-                current.setdefault('error', 'Worker encerrado sem registrar o estado final')
+                message = 'Worker encerrado sem registrar o estado final'
+                if last := last_log_event(ws, run_id):
+                    # Diz onde ele parou: sem traceback no log, o processo foi encerrado de fora.
+                    message += f'; último evento do log: {last}'
+                current.setdefault('error', message)
             statuses = current.get('statuses')
             if isinstance(statuses, dict):
                 # Nenhuma tarefa continua em andamento depois que o worker morreu.
@@ -220,6 +224,15 @@ def unlock(ws: Workspace) -> str:
             state.write_json(ws.status(run_id), {**current, 'recovery_required': False})
     state.retry_permission_error(ws.lock.unlink)
     return f'Reserva {run_id or "sem identificador"} removida. Uma nova execução pode ser iniciada.'
+
+
+def last_log_event(ws: Workspace, run_id: str) -> str | None:
+    """Última linha não vazia do run.log da execução, ou None sem log."""
+    try:
+        lines = ws.log(run_id).read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return None
+    return next((line.strip()[:300] for line in reversed(lines) if line.strip()), None)
 
 
 def read_options(ws: Workspace, run_id: str) -> dict[str, Any] | None:

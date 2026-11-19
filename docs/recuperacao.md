@@ -15,7 +15,7 @@ O relatório completo é um objeto JSON com quatro campos:
 - `reservation`: `run_id`, `pid`, `stop_requested` e `worker_alive` da reserva ativa, ou `null`.
 - `log`: as últimas linhas do log do worker lançado pelo MCP, com os eventos da execução (lotes, estados das tarefas, fases, vereditos, commits aplicados e erros).
 
-`worker_alive` é `false` quando o processo que deveria estar trabalhando na execução não existe mais: o worker que a assumiu ou, antes disso, o worker lançado pelo MCP ou o processo que criou a reserva. Nesse caso o estado gravado não muda mais, mesmo que diga `running`. `wait_for_run` tenta então a retomada automática, descrita abaixo; se ela não for possível, siga [Após um encerramento abrupto](#após-um-encerramento-abrupto).
+`worker_alive` é `false` quando o processo que deveria estar trabalhando na execução não existe mais: o worker que a assumiu ou, antes disso, o worker lançado pelo MCP ou o processo que criou a reserva. Nesse caso o estado gravado não muda mais, mesmo que diga `running`. Ao liberar a reserva, o `error` da execução diz `Worker encerrado sem registrar o estado final` seguido do último evento do `run.log`. Sem um traceback antes dele, o processo foi encerrado de fora, por exemplo junto com o app. `wait_for_run` tenta então a retomada automática, descrita abaixo; se ela não for possível, siga [Após um encerramento abrupto](#após-um-encerramento-abrupto).
 
 O resumo de `wait_for_run` traz `run_id`, `state`, `statuses`, `target`, `task_errors` (o começo do erro de cada tarefa que falhou), `task_failures` (a categoria da falha de cada tarefa, descrita abaixo), `waste` e `cost` (iguais aos do `status.json`), `recovery_required`, `error`, `duration_seconds`, `reservation_state`, `worker_alive`, `stop_requested` e `timed_out`. A ferramenta retorna assim que a execução chega a um estado final, o worker morre ou não há execução reservada. Se o tempo pedido (1 a 600 segundos) acabar antes, `timed_out` vem `true` e basta chamar de novo. Pareceres, tempos por fase e log ficam só no relatório completo.
 
@@ -86,6 +86,7 @@ Em `details.<id>`:
   - `executor_error`: o executor terminou com erro, ou com saída que não se entende, depois das novas tentativas;
   - `executor_noop`: o executor terminou sem alterar arquivos;
   - `timeout`: um comando passou do tempo limite;
+  - `stalled`: o executor ficou `CONTRACANTO_AGENT_IDLE_TIMEOUT` segundos sem saída nova nem alteração de arquivos no worktree e foi encerrado, depois das novas tentativas;
   - `scope`: arquivo alterado fora de `files`;
   - `patch_too_large`: o patch passa de `CONTRACANTO_REVIEW_PATCH_LIMIT`;
   - `inherited_base`: os testes já falhavam na base e continuam falhando;
@@ -238,7 +239,9 @@ Para liberar um único worktree, use `git worktree remove "CAMINHO_EXATO"`. O Gi
 | `é um subdiretório do repositório Git` | Informe em `--repo` ou `CONTRACANTO_REPO` a raiz do repositório |
 | `HEAD destacado` | Faça checkout de uma branch ou informe `--branch NOME` |
 | `O operador fixou o comando` | Use o comando mostrado no erro, definido em `CONTRACANTO_TEST_COMMAND` ou `CONTRACANTO_SETUP_COMMAND` |
-| `Instale/autentique agy e claude` | O PATH do processo MCP |
+| `Não encontrado no PATH: agy` (ou `claude`) | O PATH do processo MCP; depois de instalar, reinicie o app |
+| `Modelo do executor '…' não está em agy models` | `CONTRACANTO_AGENT_MODEL` e a lista de `agy models` |
+| `ficou …s sem progresso` | O executor travou ou só leu arquivos; aumente `CONTRACANTO_AGENT_IDLE_TIMEOUT` se a tarefa exige uma leitura longa antes de escrever |
 | `Comando de testes não encontrado` ou `Comando de preparação não encontrado` | O nome do executável e o PATH do worker |
 | Nenhum estado gerado | O log do MCP; falhas antes do primeiro estado aparecem ali |
 

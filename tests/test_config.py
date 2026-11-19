@@ -116,6 +116,8 @@ class PinnedCommandTests(unittest.TestCase):
             support.temp_workspace(server) as ws,
             patch.object(config, 'TEST_COMMAND', ['pytest']),
             patch.object(server.process, 'launch_detached', return_value=(1, True)) as launch,
+            # Só o comando fixado está em jogo aqui; pytest pode nem estar instalado.
+            patch.object(server, 'preflight'),
         ):
             result = server.submit_plan(self.PLAN, test_command_json='["curl", "x"]')
             self.assertTrue(result.startswith('Erro: '), result)
