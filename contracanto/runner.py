@@ -20,7 +20,15 @@ from typing import Any
 
 from . import agents, config, gitops, state
 from .agents import Artifact
-from .errors import IntegrationStateError, RecoveryRequired, RunCancelled, describe, recovery_on_failure
+from .errors import (
+    IntegrationStateError,
+    RecoveryRequired,
+    RunCancelled,
+    describe,
+    failure_category,
+    recovery_on_failure,
+    tag,
+)
 from .gitops import TargetCheckout
 from .plan import Plan, Task, overlaps, validate
 from .state import RunContext, TaskStatus, Workspace
@@ -31,6 +39,11 @@ log = logging.getLogger('contracanto')
 def _summary(error: BaseException) -> str:
     """Primeira linha do erro, para o log de eventos."""
     return describe(error).splitlines()[0][:300]
+
+
+def _failure(error: BaseException, phase: state.Phase) -> dict[str, str]:
+    """Registro de `details.<id>.failure`: a categoria da falha e a fase em que ela ocorreu."""
+    return {'category': failure_category(error), 'phase': phase}
 
 
 def resolve_command(command: Sequence[str], root: Path, label: str) -> list[str]:
@@ -350,7 +363,7 @@ def run_batch(ctx: RunContext, batch: Sequence[Task], base: str, context: str, m
         except Exception as error:
             log.info('%s: implementação falhou: %s', task['id'], _summary(error))
             run.mark(task['id'], 'failed')
-            run.set_details(task['id'], {'error': str(error)})
+            run.set_details(task['id'], {'error': str(error), 'failure': _failure(error, 'implementation')})
             if isinstance(error, RecoveryRequired):
                 recovery_error = error
 
@@ -403,18 +416,25 @@ def review_task(
     task_id = task['id']
     run.set_details(task_id, {'worktree': artifact.worktree, 'commit': artifact.commit})
     feedback = ''
+    phase: state.Phase = 'review'
     try:
         for attempt in range(retries + 1):
             ctx.stop.check()
+            phase = 'review'
             gitops.check_scope(task, Path(artifact.worktree), base)
             with run.phase(task_id, 'review'):
-                approved, feedback = agents.review(artifact, tests, ctx.stop)
+                result = agents.review(artifact, tests, ctx.stop)
+            approved, feedback = result
             log.info('%s: revisão %d %s', task_id, attempt + 1, 'aprovada' if approved else 'rejeitada')
             _record_review(ctx, task_id, attempt + 1, approved, feedback)
             if approved:
                 return feedback
             if attempt == retries:
-                raise RuntimeError('Rejeitado após tentativas: ' + feedback[-config.ERROR_TAIL :])
+                # Uma rejeição só por critério que os testes não comprovam pede outro plano, não outra correção.
+                unverifiable = getattr(result, 'unverifiable_only', False)
+                error = RuntimeError('Rejeitado após tentativas: ' + feedback[-config.ERROR_TAIL :])
+                raise tag(error, 'criteria_unverifiable' if unverifiable else 'review_rejected')
+            phase = 'repair'
             with run.phase(task_id, 'repair'):
                 agents.repair(ctx, artifact, base, context, feedback)
             run.update_details(task_id, commit=artifact.commit)
@@ -423,7 +443,7 @@ def review_task(
     except Exception as error:
         log.info('%s: revisão falhou: %s', task_id, _summary(error))
         run.mark(task_id, 'failed')
-        run.update_details(task_id, error=str(error), review=feedback)
+        run.update_details(task_id, error=str(error), review=feedback, failure=_failure(error, phase))
         if isinstance(error, RecoveryRequired):
             raise
         run.save()
@@ -485,7 +505,7 @@ def integrate_task(
     except Exception as error:
         log.info('%s: integração falhou: %s', task_id, _summary(error))
         run.mark(task_id, 'failed')
-        run.update_details(task_id, error=str(error), review=feedback)
+        run.update_details(task_id, error=str(error), review=feedback, failure=_failure(error, 'integration'))
         if isinstance(error, RecoveryRequired):
             run.require_recovery()
             return
@@ -585,9 +605,8 @@ def prepare_root(ctx: RunContext, task_id: str, head: str, branch: str | None) -
     ctx.stop.check()
     if result.returncode:
         output = (result.stdout + '\n' + result.stderr).strip()[-config.ERROR_TAIL :]
-        raise RuntimeError(
-            f'Preparação na raiz falhou antes dos testes de integração (código {result.returncode}):\n{output}'
-        )
+        message = f'Preparação na raiz falhou antes dos testes de integração (código {result.returncode}):\n{output}'
+        raise tag(RuntimeError(message), 'tooling')
     ctx.root_prepared = head
 
 
@@ -614,7 +633,8 @@ def integrate(
         applied = gitops.git('cherry-pick', candidate, cwd=root, check=False)
     if applied.returncode:
         _abort_cherry_pick(root, target)
-        raise RuntimeError('Conflito ao integrar commit; requer intervenção ou replanejamento')
+        message = 'Conflito ao integrar commit; requer intervenção ou replanejamento'
+        raise tag(RuntimeError(message), 'integration_conflict')
     with recovery_on_failure('Não foi possível identificar o HEAD integrado'):
         integrated_head = gitops.head(root)
     run.update_details(task_id, integrated_commit=integrated_head)
@@ -635,17 +655,16 @@ def integrate(
         if integrated.returncode:
             # A causa costuma estar no fim da saída: a cauda vem inteira, depois do cabeçalho.
             output = (integrated.stdout + '\n' + integrated.stderr).strip()[-config.ERROR_TAIL :]
-            raise RuntimeError(
-                f'Testes de integração falharam (código {integrated.returncode}):\n{output}'
-                + ('\n' + hint if hint else '')
-            )
+            message = f'Testes de integração falharam (código {integrated.returncode}):\n{output}'
+            raise tag(RuntimeError(message + ('\n' + hint if hint else '')), 'integration_tests')
     except RecoveryRequired:
         raise
     except (Exception, KeyboardInterrupt) as integration_error:
         _rollback(ctx, task_id, integrated_head, target)
         if isinstance(integration_error, (KeyboardInterrupt, RunCancelled)):
             raise
-        raise RuntimeError(f'Integração revertida: {integration_error}') from integration_error
+        reverted = RuntimeError(f'Integração revertida: {integration_error}')
+        raise tag(reverted, failure_category(integration_error)) from integration_error
     run.mark(task_id, 'approved')
     _persist_integration(ctx)
     target.head = integrated_head

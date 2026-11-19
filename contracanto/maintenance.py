@@ -105,6 +105,11 @@ def summarize(report: dict[str, Any]) -> dict[str, Any]:
         for task_id, detail in details.items()
         if isinstance(detail, dict) and detail.get('error')
     }
+    failures = {
+        task_id: detail['failure']['category']
+        for task_id, detail in details.items()
+        if isinstance(detail, dict) and isinstance(detail.get('failure'), dict) and detail['failure'].get('category')
+    }
     return {
         'run_id': run.get('run_id'),
         'state': run.get('state'),
@@ -114,6 +119,8 @@ def summarize(report: dict[str, Any]) -> dict[str, Any]:
         'statuses': run.get('statuses') or {},
         'target': run.get('target'),
         'task_errors': errors,
+        'task_failures': failures,
+        'waste': run.get('waste'),
         'reservation_state': report['reservation_state'],
         'worker_alive': reservation.get('worker_alive'),
         'stop_requested': bool(reservation.get('stop_requested')),

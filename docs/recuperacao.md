@@ -17,7 +17,7 @@ O relatório completo é um objeto JSON com quatro campos:
 
 `worker_alive` é `false` quando o processo que deveria estar trabalhando na execução não existe mais: o worker que a assumiu ou, antes disso, o worker lançado pelo MCP ou o processo que criou a reserva. Nesse caso o estado gravado não muda mais, mesmo que diga `running`. `wait_for_run` tenta então a retomada automática, descrita abaixo; se ela não for possível, siga [Após um encerramento abrupto](#após-um-encerramento-abrupto).
 
-O resumo de `wait_for_run` traz `run_id`, `state`, `statuses`, `target`, `task_errors` (o começo do erro de cada tarefa que falhou), `recovery_required`, `error`, `duration_seconds`, `reservation_state`, `worker_alive`, `stop_requested` e `timed_out`. A ferramenta retorna assim que a execução chega a um estado final, o worker morre ou não há execução reservada. Se o tempo pedido (1 a 600 segundos) acabar antes, `timed_out` vem `true` e basta chamar de novo. Pareceres, tempos por fase e log ficam só no relatório completo.
+O resumo de `wait_for_run` traz `run_id`, `state`, `statuses`, `target`, `task_errors` (o começo do erro de cada tarefa que falhou), `task_failures` (a categoria da falha de cada tarefa, descrita abaixo), `waste` (igual ao do `status.json`), `recovery_required`, `error`, `duration_seconds`, `reservation_state`, `worker_alive`, `stop_requested` e `timed_out`. A ferramenta retorna assim que a execução chega a um estado final, o worker morre ou não há execução reservada. Se o tempo pedido (1 a 600 segundos) acabar antes, `timed_out` vem `true` e basta chamar de novo. Pareceres, tempos por fase e log ficam só no relatório completo.
 
 ### Estados
 
@@ -40,6 +40,7 @@ Além de `state`, `run_id`, `statuses`, `details`, `recovery_required` e `error`
 - `target`: a `branch` de destino (ref completa) e o commit `base` sobre o qual a execução começou; ausente quando a preparação falha antes disso. `branch_removed: true` indica que a branch de integração terminou vazia e foi apagada.
 - `timings.<id>`: `started_at` e `finished_at` da tarefa e, em `phases`, os segundos acumulados e o número de vezes de cada fase (`implementation`, `review`, `repair`, `integration`). Uma tarefa bloqueada antes de começar não tem `started_at`. Quando o CLI chamado na fase informa tokens, a fase também traz `tokens`, descrito abaixo.
 - `usage`: os tokens somados da execução por papel, em `executor` (implementação e correções) e `reviewer` (revisões). O campo só aparece depois da primeira chamada medida.
+- `waste`: o que foi gasto nas tarefas que falharam ou foram canceladas, com `tasks` (quantas), `seconds` (soma das fases), `tokens` (no formato abaixo, quando medidos) e `by_category` (quantas falhas de cada categoria). Só aparece quando alguma tarefa falhou ou foi cancelada. Tarefas bloqueadas não entram, porque não chegaram a rodar, nem as correções de uma tarefa que acabou aprovada.
 
 `tokens` e cada papel de `usage` têm o mesmo formato, com os campos somados entre todas as chamadas, inclusive as que falharam e as novas tentativas:
 
@@ -61,6 +62,22 @@ Em `details.<id>`:
 - `integrated_commit` é gravado assim que o worker identifica o commit aplicado, antes dos testes.
 - `revert_commit` identifica o commit que restaurou a árvore, quando a integração exigiu um revert.
 - `error` resume a falha e `review` guarda o último parecer.
+- `failure` traz a `category` da falha e a `phase` em que ela ocorreu (`implementation`, `review`, `repair` ou `integration`), para separar defeito da ferramenta de tarefa mal dimensionada. Categorias:
+  - `tooling`: executável ausente, preparação do worktree ou da raiz, Git ou sistema de arquivos;
+  - `executor_error`: o executor terminou com erro, ou com saída que não se entende, depois das novas tentativas;
+  - `executor_noop`: o executor terminou sem alterar arquivos;
+  - `timeout`: um comando passou do tempo limite;
+  - `scope`: arquivo alterado fora de `files`;
+  - `patch_too_large`: o patch passa de `CONTRACANTO_REVIEW_PATCH_LIMIT`;
+  - `inherited_base`: os testes já falhavam na base e continuam falhando;
+  - `review_rejected`: rejeitada depois de todas as correções;
+  - `criteria_unverifiable`: rejeitada só porque o comando de testes não comprova um critério, com os testes passando. Mais correções não resolvem: troque o critério ou o comando;
+  - `reviewer_error`: o revisor terminou com erro ou com resposta que não se entende;
+  - `integration_conflict`: conflito ao aplicar o commit na branch de destino;
+  - `integration_tests`: os testes falharam depois de integrar, e a integração foi revertida;
+  - `recovery`: Git ou processos em estado incerto, com recuperação manual exigida;
+  - `cancelled`: encerramento pedido pelo operador;
+  - `other`: qualquer outra falha.
 - `reviews` lista cada parecer, com `attempt`, `approved`, `at` e `feedback`, gravado assim que o revisor responde, antes da correção; o motivo de uma rejeição também vai para o `run.log` e aparece no `--watch` enquanto a tarefa não termina.
 - `warning` avisa quando a saída do teste de integração cita caminhos em `.agent-runs/`.
 - `worktree_removed` ou `cleanup_error` registram a limpeza do worktree de uma tarefa aprovada.

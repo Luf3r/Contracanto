@@ -28,6 +28,8 @@ Phase = Literal['implementation', 'review', 'repair', 'integration']
 TERMINAL_STATES: tuple[RunStatus, ...] = ('completed', 'failed', 'cancelled')
 UNFINISHED_STATUSES: tuple[TaskStatus, ...] = ('pending', 'running', 'review')
 FINISHED_STATUSES: tuple[TaskStatus, ...] = ('approved', 'failed', 'blocked', 'cancelled')
+# Tarefas cujo tempo e tokens não viraram commit; uma bloqueada nem chegou a gastar.
+WASTED_STATUSES: tuple[TaskStatus, ...] = ('failed', 'cancelled')
 RUN_ID = re.compile('[0-9a-f]{64}')
 
 log = logging.getLogger('contracanto')
@@ -242,12 +244,35 @@ class RunState:
             }
             if self.usage:
                 data['usage'] = self.usage
+            if waste := self._waste():
+                data['waste'] = waste
             if self.error is not None:
                 data['error'] = self.error
             if self.target is not None:
                 data['target'] = self.target
             # Uma cópia independente: a gravação não pode observar uma alteração pela metade.
             return json.loads(json.dumps(data))
+
+    def _waste(self) -> dict[str, Any] | None:
+        """Tempo e tokens gastos nas tarefas que falharam ou foram canceladas, e as categorias das falhas."""
+        lost = [task_id for task_id, status in self.statuses.items() if status in WASTED_STATUSES]
+        if not lost:
+            return None
+        seconds = 0.0
+        tokens: dict[str, int] = {}
+        categories: dict[str, int] = {}
+        for task_id in lost:
+            for entry in self.timings.get(task_id, {}).get('phases', {}).values():
+                seconds += entry.get('seconds', 0.0)
+                for name, value in (entry.get('tokens') or {}).items():
+                    tokens[name] = tokens.get(name, 0) + value
+            failure = self.details.get(task_id, {}).get('failure')
+            if isinstance(failure, dict) and failure.get('category'):
+                categories[failure['category']] = categories.get(failure['category'], 0) + 1
+        waste: dict[str, Any] = {'tasks': len(lost), 'seconds': round(seconds, 1), 'by_category': categories}
+        if tokens:
+            waste['tokens'] = tokens
+        return waste
 
     def save(self) -> None:
         with self._lock:

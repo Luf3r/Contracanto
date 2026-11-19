@@ -127,6 +127,14 @@ A F1 precisa normalizar os três para um formato único: `input` sem cache, `cac
 
 **Pronto quando:** cada caso da tabela inicial, reproduzido em teste, cair na categoria certa.
 
+**Situação (19/11/2026): implementada.** Diferenças em relação ao desenho acima:
+
+- **Marca em vez de classes novas:** a categoria é gravada na própria exceção (`errors.tag`), sem trocar tipo nem mensagem. Exceções sem marca são classificadas pelo tipo (`errors.failure_category`).
+- **Revisão:** `agents.review` devolve um `ReviewResult`, que continua desempacotável como o par `(aprovado, parecer)` e traz `unverifiable_only`.
+- **Categorias a mais:** `timeout`, `reviewer_error` e `other`. A integração foi separada em `integration_conflict` e `integration_tests`.
+- **Onde aparecem:** o desperdício fica em `waste`, no `status.json` e no resumo do `wait_for_run`, e o `--watch` mostra a categoria antes de cada erro.
+- **Fica para a F4:** `stalled`, que depende do watchdog.
+
 ## F4: falhar cedo e detectar executor parado
 
 - **Pré-checagem** em `submit_plan` e `resume_run`, antes de reservar a execução:

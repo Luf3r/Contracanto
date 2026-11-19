@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import config, gitops, process, usage
-from .errors import RecoveryRequired, RunCancelled, describe
+from .errors import RecoveryRequired, RunCancelled, describe, tag
 from .plan import Task
 from .state import RunContext, StopSignal
 
@@ -38,13 +39,15 @@ REVIEW_PROMPT = (
     'Testes não executados NÃO equivalem a testes aprovados. Não modifique arquivos. '
     'test_command é a única verificação que rodou, no worktree e na integração: um critério que exige '
     'outra verificação (lint, tipos, build, outro script) não está comprovado pela saída dos testes; '
-    'nesse caso rejeite e diga qual verificação faltou. '
+    'nesse caso rejeite e liste o critério em unverifiable, dizendo qual verificação faltou, '
+    'e não em problems. '
     'Separe defeito herdado de defeito da tarefa: o que já existia na base, inclusive as falhas de '
     'base_test_output quando presente, não impede a aprovação, salvo quando a tarefa pede para corrigir; '
     'liste esses pontos em inherited, não em problems. '
     'Responda SOMENTE com um objeto JSON, sem texto antes ou depois, no formato '
     '{"verdict": "APPROVED" ou "REJECTED", "summary": "uma frase", '
     '"problems": ["cada problema da tarefa que impede a aprovação"], '
+    '"unverifiable": ["cada critério que test_command não comprova, e a verificação que faltou"], '
     '"inherited": ["cada problema que já existia na base"]}.\n'
 )
 VERDICTS = ('APPROVED', 'REJECTED')
@@ -57,6 +60,31 @@ PATCH_ENCODINGS = ('utf-8', 'cp1252', 'latin-1')
 class Verdict:
     approved: bool
     text: str
+    problems: tuple[str, ...] = ()
+    # Critérios que o comando de testes não comprova; sozinhos, não são defeito do código.
+    unverifiable: tuple[str, ...] = ()
+
+
+class ReviewResult(tuple[bool, str]):
+    """Aprovação e parecer de uma revisão, desempacotáveis como um par.
+
+    `unverifiable_only` diz que a única razão da rejeição foram critérios que o comando de
+    testes não comprova, com os testes passando: a tarefa precisa de outro critério ou de
+    outro comando, não de mais uma correção.
+    """
+
+    unverifiable_only: bool
+
+    def __new__(cls, approved: bool, feedback: str, unverifiable_only: bool = False) -> ReviewResult:
+        result = super().__new__(cls, (approved, feedback))
+        result.unverifiable_only = unverifiable_only
+        return result
+
+
+def _items(value: object) -> tuple[str, ...]:
+    """Itens não vazios de um campo do veredito, que o revisor pode mandar como texto ou lista."""
+    values = [value] if isinstance(value, str) else (value if isinstance(value, list) else [])
+    return tuple(text for item in values if (text := str(item).strip()))
 
 
 def _verdict_object(response: str) -> dict | None:
@@ -86,15 +114,12 @@ def parse_verdict(response: str) -> Verdict:
     lines = [verdict]
     if summary := str(data.get('summary') or '').strip():
         lines.append(summary)
-    problems = data.get('problems') or []
-    if isinstance(problems, str):
-        problems = [problems]
-    lines.extend(f'- {problem}' for problem in problems if str(problem).strip())
-    inherited = data.get('inherited') or []
-    if isinstance(inherited, str):
-        inherited = [inherited]
-    lines.extend(f'- herdado da base: {item}' for item in inherited if str(item).strip())
-    return Verdict(verdict == 'APPROVED', '\n'.join(lines))
+    problems = _items(data.get('problems'))
+    lines.extend(f'- {problem}' for problem in problems)
+    unverifiable = _items(data.get('unverifiable'))
+    lines.extend(f'- não comprovado pelos testes: {item}' for item in unverifiable)
+    lines.extend(f'- herdado da base: {item}' for item in _items(data.get('inherited')))
+    return Verdict(verdict == 'APPROVED', '\n'.join(lines), problems, unverifiable)
 
 
 @dataclass(frozen=True)
@@ -107,6 +132,8 @@ class BaseTests:
 
 class InheritedFailure(RuntimeError):
     """Os testes já falhavam na base e continuam falhando: revisão e correções não ajudam."""
+
+    contracanto_category = 'inherited_base'
 
 
 @dataclass
@@ -137,10 +164,11 @@ def parse_agy_output(stdout: str) -> str:
     events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
     results = [event['result'] for event in events if event.get('event') == 'result']
     if len(results) != 1:
-        raise RuntimeError('Antigravity não retornou exatamente um resultado terminal')
+        raise tag(RuntimeError('Antigravity não retornou exatamente um resultado terminal'), 'executor_error')
     result = results[0]
     if result.get('status') != 'SUCCESS':
-        raise RuntimeError(f'Antigravity: {result.get("status")}: {result.get("error", "")}')
+        message = f'Antigravity: {result.get("status")}: {result.get("error", "")}'
+        raise tag(RuntimeError(message), 'executor_error')
     return str(result.get('response', ''))
 
 
@@ -200,11 +228,12 @@ def prepare_worktree(ctx: RunContext, wt: Path, base: str, branch: str) -> None:
     result = process.run(ctx.setup, cwd=wt, timeout=config.SETUP_TIMEOUT, check=False, stop=ctx.stop)
     if result.returncode:
         output = (result.stdout + '\n' + result.stderr)[-config.ERROR_TAIL :]
-        raise RuntimeError(f'Preparação do worktree falhou (código {result.returncode}): {output}')
+        raise tag(RuntimeError(f'Preparação do worktree falhou (código {result.returncode}): {output}'), 'tooling')
     gitops.check_checkout(wt, base, branch)
     changed = gitops.changed_files(wt)
     if changed:
-        raise RuntimeError(f'Preparação do worktree alterou arquivos não ignorados, por exemplo {changed[0]}')
+        message = f'Preparação do worktree alterou arquivos não ignorados, por exemplo {changed[0]}'
+        raise tag(RuntimeError(message), 'tooling')
 
 
 def call_agent(ctx: RunContext, task: Task, prompt: str, wt: Path, expected_head: str, branch: str | None) -> str:
@@ -216,6 +245,9 @@ def call_agent(ctx: RunContext, task: Task, prompt: str, wt: Path, expected_head
             raise
         except (RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             if attempt == config.AGENT_RETRIES:
+                # Um erro do agy sem categoria própria, como uma saída com código diferente de zero.
+                if not isinstance(error, subprocess.TimeoutExpired):
+                    tag(error, 'executor_error')
                 raise
             # O que o agente já escreveu fica para a nova tentativa, desde que a
             # branch e o commit do worktree continuem os esperados.
@@ -276,10 +308,10 @@ def run_executor(ctx: RunContext, task: Task, base: str, context: str) -> Artifa
     gitops.check_scope(task, wt, base)
     if not gitops.changed_files(wt):
         # O relatório costuma explicar a recusa; sem ele, o motivo fica só no log do agy.
-        raise RuntimeError(
-            f'O executor não alterou arquivos em {task["id"]}. Relatório do executor:\n'
-            + (report.strip()[-config.ERROR_TAIL :] or '(vazio)')
+        message = f'O executor não alterou arquivos em {task["id"]}. Relatório do executor:\n' + (
+            report.strip()[-config.ERROR_TAIL :] or '(vazio)'
         )
+        raise tag(RuntimeError(message), 'executor_noop')
     gitops.commit_all(wt, commit_message(ctx, task))
     return Artifact(
         task=task,
@@ -319,7 +351,7 @@ def _decode_patch(patch: bytes) -> tuple[str, str]:
     raise AssertionError('latin-1 decodifica qualquer sequência de bytes')
 
 
-def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | None = None) -> tuple[bool, str]:
+def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | None = None) -> ReviewResult:
     """Roda os testes no worktree e pede o veredito; aprova apenas com ambos positivos.
 
     Devolve a aprovação e o parecer, que inclui a saída dos testes quando eles falham.
@@ -354,10 +386,11 @@ def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | N
     ).stdout
     patch, encoding = _decode_patch(patch_bytes)
     if len(patch) > config.REVIEW_PATCH_LIMIT:
-        raise RuntimeError(
+        message = (
             f'Patch de {len(patch)} caracteres excede o limite de revisão ({config.REVIEW_PATCH_LIMIT}); '
             f'divida a tarefa ou ajuste {config.ENV_PREFIX}REVIEW_PATCH_LIMIT'
         )
+        raise tag(RuntimeError(message), 'patch_too_large')
     prompt = _with_payload(
         REVIEW_PROMPT,
         {
@@ -375,7 +408,7 @@ def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | N
     )
     # Fora do worktree: o revisor recebe tudo pelo pedido e não deve carregar as instruções
     # que o projeto revisado guarda para outros papéis, como o CLAUDE.md do arquiteto.
-    with tempfile.TemporaryDirectory(prefix='contracanto-review-') as neutral:
+    with tempfile.TemporaryDirectory(prefix='contracanto-review-') as neutral, _reviewer_errors():
         response = process.run(
             [
                 'claude',
@@ -395,9 +428,21 @@ def review(artifact: Artifact, test_command: Sequence[str], stop: StopSignal | N
             input_data=prompt,
             stop=stop,
         )
-    usage.record('reviewer', usage.from_claude(response.stdout))
-    verdict = parse_verdict(parse_claude_output(response.stdout))
+        usage.record('reviewer', usage.from_claude(response.stdout))
+        verdict = parse_verdict(parse_claude_output(response.stdout))
     feedback = verdict.text
     if test.returncode:
         feedback += f'\nTestes do worktree falharam (código {test.returncode}):\n{test_output}'
-    return verdict.approved and test.returncode == 0, feedback
+    passed = test.returncode == 0
+    unverifiable_only = passed and not verdict.approved and bool(verdict.unverifiable) and not verdict.problems
+    return ReviewResult(verdict.approved and passed, feedback, unverifiable_only)
+
+
+@contextlib.contextmanager
+def _reviewer_errors() -> Iterator[None]:
+    """Marca como falha do revisor o erro da chamada ao claude ou da leitura da resposta."""
+    try:
+        yield
+    except (RuntimeError, ValueError) as error:
+        tag(error, 'reviewer_error')
+        raise

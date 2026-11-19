@@ -137,6 +137,16 @@ def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[: max(0, width - 1)] + '…'
 
 
+def _labeled_error(detail: dict[str, Any]) -> str | None:
+    """Erro da tarefa precedido da categoria da falha, quando ela foi registrada."""
+    error = detail.get('error')
+    if not error:
+        return None
+    failure = detail.get('failure')
+    category = failure.get('category') if isinstance(failure, dict) else None
+    return f'[{category}] {error}' if category else str(error)
+
+
 def render(report: dict[str, Any], log: str, now: datetime, width: int = 100, color: bool = False) -> list[str]:
     """Linhas do painel para um relatório de maintenance.status_report."""
     p = Painter(color)
@@ -195,7 +205,7 @@ def render(report: dict[str, Any], log: str, now: datetime, width: int = 100, co
         for task_id, review in rejected:
             lines.append('  ' + p.paint(task_id, 'review') + ': ' + _clip(review, width - len(task_id) - 4))
 
-    errors = [(task_id, detail.get('error')) for task_id, detail in details.items() if isinstance(detail, dict)]
+    errors = [(task_id, _labeled_error(detail)) for task_id, detail in details.items() if isinstance(detail, dict)]
     errors = [(task_id, error) for task_id, error in errors if error]
     if run.get('error'):
         errors.insert(0, ('execução', run['error']))
@@ -206,6 +216,12 @@ def render(report: dict[str, Any], log: str, now: datetime, width: int = 100, co
             # Começo e fim do erro: o que falhou e, no fim da saída, a causa.
             summary = _clip(maintenance.abbreviate(str(error), room), room)
             lines.append('  ' + p.paint(task_id, 'failed') + ': ' + summary)
+
+    waste = run.get('waste') or {}
+    if waste.get('tasks'):
+        categories = ', '.join(f'{name} {count}' for name, count in sorted((waste.get('by_category') or {}).items()))
+        text = f'{waste["tasks"]} tarefa(s), {_duration(waste.get("seconds") or 0)}'
+        lines += ['', p.bold('Desperdício') + '  ' + _clip(text + (f' ({categories})' if categories else ''), width)]
 
     events = [line for line in log.splitlines() if line.strip()][-EVENT_LINES:]
     if events:

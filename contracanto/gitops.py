@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config, plan, process
-from .errors import RecoveryRequired
+from .errors import RecoveryRequired, tag
 from .state import StopSignal
 
 AGENT_IDENTITY = ('-c', 'user.name=Agent Executor', '-c', 'user.email=agent@localhost')
@@ -178,7 +178,7 @@ def changed_files(wt: str | Path) -> list[str]:
 def check_paths_in_scope(task: plan.Task, paths: Iterable[str]) -> None:
     for name in paths:
         if not plan.in_scope(task['files'], name):
-            raise RuntimeError(f'Arquivo fora do escopo em {task["id"]}: {name}')
+            raise tag(RuntimeError(f'Arquivo fora do escopo em {task["id"]}: {name}'), 'scope')
 
 
 def check_tree_scope(task: plan.Task, wt: str | Path, before: str, after: str) -> None:
