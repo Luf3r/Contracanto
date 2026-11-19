@@ -124,6 +124,7 @@ Os ajustes abaixo são feitos por variáveis de ambiente. No MCP, defina-as em `
 | `CONTRACANTO_AUTO_RESUME` | 1 | Vezes que `wait_for_run` relança sozinho uma execução cujo worker morreu (0 a 3; 0 desliga) |
 | `CONTRACANTO_WORKTREES_DIR` | `~/.cache/Contracanto/worktrees` | Pasta onde ficam os worktrees das tarefas, separada por repositório; mantenha-a fora do repositório orquestrado |
 | `CONTRACANTO_REVIEW_PATCH_LIMIT` | 400000 | Tamanho máximo do patch enviado ao revisor, em caracteres |
+| `CONTRACANTO_TASK_FILES_WARNING` | 15 | Entradas em `files` acima das quais a submissão avisa que a tarefa pode ser grande demais; o aviso não bloqueia |
 | `CONTRACANTO_PRICES_JSON` | sem valor | Preço por modelo, em dólares por milhão de tokens, para estimar o custo de cada chamada; formato em [docs/recuperacao.md](docs/recuperacao.md#custo). Sem valor, só o custo que o próprio CLI informa é usado |
 | `CONTRACANTO_EXECUTOR_BILLING` | `plan` | `api` quando o executor é cobrado por token; `plan` quando sai do limite de uma assinatura, e o custo vale só como equivalente |
 | `CONTRACANTO_REVIEWER_BILLING` | `plan` | O mesmo para o revisor (`claude -p`) |
@@ -166,7 +167,7 @@ O plano é um objeto JSON com `tasks` (1 a 100 tarefas). `goal` é contexto desc
 
 Diretórios autorizam seus descendentes. Caminhos absolutos, `..`, `.`, `\\`, componentes vazios, `.git` e `.agent-runs` são rejeitados. A comparação de ownership é textual; use a grafia exata e consistente dos caminhos, inclusive maiúsculas/minúsculas. A verificação de escopo é posterior à execução e não é uma sandbox.
 
-O MCP exige `plan_json` e `test_command_json`. Ambos são strings contendo JSON. Exemplo de argumentos de `submit_plan`:
+O MCP exige `plan_json` e `test_command_json`. Ambos são strings contendo JSON. A resposta de `submit_plan` e de `resume_run` termina com "Avisos do plano" quando uma tarefa lista dois ou mais diretórios da raiz inteiros em `files`, tem mais entradas que `CONTRACANTO_TASK_FILES_WARNING` ou tem um critério que cita um comando diferente do de testes, como `tsc` quando os testes são `npm run check`. Os avisos não impedem a execução; pela linha de comando, saem no stderr como `Aviso do plano:`. Exemplo de argumentos de `submit_plan`:
 
 ```json
 {

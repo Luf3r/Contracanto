@@ -127,6 +127,9 @@ AUTO_RESUME = _count('AUTO_RESUME', 1, range(4))
 # Caracteres do patch aceitos em um pedido de revisão; acima disso a tarefa falha em vez de
 # ser revisada pela metade.
 REVIEW_PATCH_LIMIT = _count('REVIEW_PATCH_LIMIT', 400_000, range(1, 10_000_001))
+# Entradas em `files` acima das quais o submit_plan avisa que a tarefa pode ser grande demais
+# para uma revisão; o aviso não bloqueia.
+TASK_FILES_WARNING = _count('TASK_FILES_WARNING', 15, range(1, 1001))
 # Diretório onde ficam os worktrees das tarefas, fora do repositório orquestrado para que
 # ferramentas que varrem a árvore a partir da raiz não enxerguem as cópias. Vazio: a pasta
 # Contracanto/worktrees em ~/.cache (ou $XDG_CACHE_HOME), também no Windows; veja state.worktrees_parent.
@@ -164,6 +167,7 @@ TUNABLE = (
     'AGENT_RETRIES',
     'AUTO_RESUME',
     'REVIEW_PATCH_LIMIT',
+    'TASK_FILES_WARNING',
     'WORKTREES_DIR',
     'TEST_COMMAND',
     'SETUP_COMMAND',

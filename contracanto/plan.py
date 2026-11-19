@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any, NotRequired, TypedDict
 
 from . import config
@@ -104,6 +105,71 @@ def validate(plan: Any) -> None:
     for task in tasks:
         _check_task(task, known_ids)
     _check_acyclic(tasks)
+
+
+# Comandos de verificação que um critério de aceitação costuma citar.
+CITED_COMMAND = re.compile(
+    r'(?<![\w./-])(?:'
+    r'(?:npm|pnpm|yarn|bun)(?:\s+run)?\s+[a-z][\w:.-]*'
+    r'|npx\s+[@\w][\w@/.:-]*'
+    r'|(?:python3?|py)\s+-m\s+[a-z][\w.]*'
+    r'|cargo\s+[a-z]+|go\s+test|make\s+[a-z][\w.-]*|wrangler\s+[a-z]+'
+    r'|pytest|vitest|jest|tsc|eslint|prettier|ruff|mypy'
+    r')(?![\w-])',
+    re.IGNORECASE,
+)
+
+
+def _canonical(command: str) -> str:
+    """Forma comparável de um comando: minúsculas, sem `run` e com um só nome para o Python."""
+    words = command.lower().split()
+    if words and words[0] in ('py', 'python3'):
+        words[0] = 'python'
+    if len(words) > 2 and words[0] in ('npm', 'pnpm', 'yarn', 'bun') and words[1] == 'run':
+        del words[1]
+    return ' '.join(words)
+
+
+def _test_line(test: list[str]) -> str:
+    # O executável pode vir como caminho completo, como C:/.../npm.cmd.
+    return _canonical(' '.join([Path(test[0]).stem, *test[1:]]))
+
+
+def warnings(plan: Plan, test: list[str], root: Path) -> list[str]:
+    """Avisos que não bloqueiam a submissão: tarefas largas demais ou critérios que o comando
+    de testes não comprova. Cabe ao arquiteto decidir se replaneja."""
+    found: list[str] = []
+    test_line = f' {_test_line(test)} '
+    shown = ' '.join(test)
+    for task in plan['tasks']:
+        task_id = task['id']
+        roots = sorted(
+            {
+                entry.rstrip('/')
+                for entry in task['files']
+                if '/' not in entry.rstrip('/') and (root / entry.rstrip('/')).is_dir()
+            }
+        )
+        if len(roots) >= 2:
+            found.append(
+                f'{task_id}: files inclui diretórios raiz inteiros ({", ".join(roots)}); '
+                'divida a tarefa por módulo para caber na revisão'
+            )
+        if len(task['files']) > config.TASK_FILES_WARNING:
+            found.append(
+                f'{task_id}: files tem {len(task["files"])} entradas, acima de {config.TASK_FILES_WARNING}; '
+                'uma tarefa grande tende a passar do limite de revisão'
+            )
+        for criterion in task['acceptance']:
+            for match in CITED_COMMAND.finditer(criterion):
+                cited = _canonical(match.group(0))
+                if f' {cited} ' not in test_line:
+                    found.append(
+                        f'{task_id}: o critério "{criterion[:100]}" cita `{match.group(0)}`, fora do comando de '
+                        f'testes (`{shown}`); só esse comando roda, e o revisor rejeita o critério que ele não comprovar'
+                    )
+                    break
+    return found
 
 
 def remaining(plan: Plan, statuses: Mapping[str, str]) -> Plan:

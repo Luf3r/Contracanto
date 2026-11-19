@@ -11,7 +11,8 @@ from pathlib import Path
 
 from . import __version__, config, maintenance, runner, state, watch
 from .errors import RunCancelled, describe
-from .plan import parse_command
+from .plan import parse_command, validate
+from .plan import warnings as plan_warnings
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -89,6 +90,16 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _print_plan_warnings(plan: object, test: list[str], root: Path) -> None:
+    """Avisos do plano no stderr; um plano inválido fica para o erro do worker."""
+    try:
+        validate(plan)
+    except ValueError:
+        return
+    for warning in plan_warnings(plan, test, root):  # type: ignore[arg-type]
+        print(f'Aviso do plano: {warning}', file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None, ws: state.Workspace | None = None) -> None:
     parser = _parser()
     _dispatch(parser, parser.parse_args(argv), ws)
@@ -147,6 +158,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace, ws: sta
         else:
             # Um worker lançado pelo MCP só lê o plano depois de assumir a reserva.
             plan = args.plan if args.reservation else json.loads(args.plan.read_text(encoding='utf-8'))
+            if not args.reservation:
+                _print_plan_warnings(plan, args.test, ws.root)
     except OSError as error:
         parser.error(f'Não foi possível ler o plano: {error}')
     except ValueError as error:

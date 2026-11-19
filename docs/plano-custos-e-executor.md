@@ -211,6 +211,14 @@ O aviso vai na resposta da ferramenta, para o arquiteto decidir.
 
 **Pronto quando:** o `CLAUDE.md` tiver as regras e os avisos tiverem teste.
 
+**Situação (19/11/2026): implementada.** Diferenças em relação ao desenho acima:
+
+- **Onde:** `plan.warnings` gera os avisos, que vão no fim da resposta de `submit_plan` e de `resume_run` e, pela linha de comando, no stderr.
+- **Diretório raiz inteiro:** uma entrada sem `/` que é uma pasta na raiz do repositório.
+- **Arquivos demais:** conta as entradas de `files`, não os arquivos de cada pasta. O limite padrão é 15 (`CONTRACANTO_TASK_FILES_WARNING`).
+- **Comando citado:** reconhece comandos comuns (`npm`/`pnpm`/`yarn`, `npx`, `python -m`, `pytest`, `tsc`, `vitest`, `jest`, `eslint`, `ruff`, `mypy`, `cargo`, `go test`, `make`, `wrangler`), trata `npm run x` como `npm x` e `py` como `python`. Um comando que o de testes roda por dentro, como o `tsc` no `npm run check`, também gera aviso, que pede para conferir.
+- **Sem aviso para "estável em duas execuções" e checagens manuais:** o texto livre gera falsos positivos demais; a regra ficou só no `CLAUDE.md`.
+
 ## F7: piloto comparativo
 
 - Escolher, com o responsável, a próxima leva real de tarefas do Sanagua. As fases 4 e 8 do plano de refatoração dependem de decisões dele.

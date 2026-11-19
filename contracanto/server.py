@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import config, gitops, maintenance, process, state
 from .plan import parse_command, validate
+from .plan import warnings as plan_warnings
 from .runner import check_repository, preflight
 
 mcp = FastMCP('Contracanto')
@@ -138,12 +139,24 @@ def submit_plan(
     Entrada inválida, execução já reservada ou repositório que não pode receber a execução
     (alterações pendentes, HEAD destacado sem branch, nome de branch inválido ou já usado)
     retornam um texto iniciado por "Erro:" sem iniciar nada. Falhas ao lançar o worker são reportadas como erro da ferramenta.
+    A resposta termina com "Avisos do plano" quando uma tarefa lista dois ou mais diretórios
+    raiz inteiros em files, tem files demais (CONTRACANTO_TASK_FILES_WARNING) ou tem um
+    critério que cita um comando diferente do de testes. Os avisos não impedem a execução.
     """
     try:
         plan, test, setup = _parse_submission(plan_json, parallel, retries, test_command_json, setup_command_json)
     except ValueError as error:
         return f'Erro: {error}'
-    return _launch(plan, parallel, retries, keep_worktrees, test, setup, branch)
+    return _with_warnings(_launch(plan, parallel, retries, keep_worktrees, test, setup, branch), plan, test)
+
+
+def _with_warnings(message: str, plan: Any, test: list[str]) -> str:
+    """Acrescenta à resposta os avisos do plano, que não bloqueiam a execução."""
+    found = plan_warnings(plan, test, WORKSPACE.root)
+    if not found:
+        return message
+    lines = '\n'.join(f'- {warning}' for warning in found)
+    return f'{message}\nAvisos do plano (não bloqueiam; replaneje se fizer sentido):\n{lines}'
 
 
 def _launch(
@@ -251,7 +264,7 @@ def resume_run(
         plan = maintenance.resume_plan(WORKSPACE, run_id.strip() or None)
     except (ValueError, RuntimeError) as error:
         return f'Erro: {error}'
-    return _launch(plan, parallel, retries, keep_worktrees, test, setup, branch)
+    return _with_warnings(_launch(plan, parallel, retries, keep_worktrees, test, setup, branch), plan, test)
 
 
 @mcp.tool()
