@@ -1,6 +1,7 @@
 """Painel da execução (`contracanto --watch`): desenho, transições e código de saída."""
 
 import json
+import os
 import unittest
 from datetime import UTC, datetime
 from io import StringIO
@@ -143,10 +144,6 @@ class WatchCliTests(unittest.TestCase):
         called.assert_called_once_with(ws)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 REJECTED = {
     'attempt': 1,
     'approved': False,
@@ -174,3 +171,71 @@ class ReviewVisibilityTests(unittest.TestCase):
         (line,) = watch.transitions(before, after)
         self.assertIn('A: revisão 1 rejeitada: Falta tratar o caso vazio.', line)
         self.assertEqual(watch.transitions(after, after), [])
+
+
+AGENTS = {
+    'executor': {'cli': 'codex', 'model': 'gpt-6-luna', 'effort': 'high'},
+    'reviewer': {'cli': 'claude', 'model': 'sonnet'},
+}
+
+
+def priced(executor_usd, reviewer_usd, **run):
+    """Status com o custo como o worker grava depois de cada chamada concluída."""
+    used = {
+        'executor': {'calls': 1, 'billing': 'plan', 'models': ['gpt-6-luna'], 'cost_usd': executor_usd},
+        'reviewer': {'calls': 1, 'billing': 'api', 'models': ['claude-sonnet-5-5'], 'cost_usd': reviewer_usd},
+    }
+    cost = {'api_usd': reviewer_usd, 'plan_equivalent_usd': executor_usd, 'unpriced_calls': 0}
+    return report(agents=AGENTS, usage=used, cost=cost, **run)
+
+
+class ModelsAndCostTests(unittest.TestCase):
+    def test_panel_names_the_reviewer_and_executor_models(self):
+        text = '\n'.join(watch.render(priced(0.5, 0.25), '', NOW, width=200))
+        self.assertIn(
+            'Modelos  revisor claude sonnet (claude-sonnet-5-5) · executor codex gpt-6-luna, esforço high', text
+        )
+
+    def test_default_model_shows_what_the_cli_reported(self):
+        agents = {'executor': {'cli': 'agy', 'model': None, 'effort': None}, 'reviewer': {'cli': 'claude'}}
+        before = report(agents=agents)
+        self.assertIn('executor agy modelo padrão', watch.models_text(before['run']) or '')
+        after = report(agents=agents, usage={'executor': {'models': ['gemini-4-hydrogen-high']}})
+        self.assertIn('executor agy gemini-4-hydrogen-high', watch.models_text(after['run']) or '')
+        self.assertNotIn('esforço', watch.models_text(after['run']) or '')
+
+    def test_status_without_agents_has_no_models_line(self):
+        self.assertNotIn('Modelos', '\n'.join(watch.render(report(), '', NOW)))
+
+    def test_running_panel_shows_the_cost_before_the_first_call(self):
+        self.assertIn('Custo    nenhuma chamada concluída ainda', '\n'.join(watch.render(report(), '', NOW)))
+
+    def test_cost_line_follows_each_status_read(self):
+        reports = [
+            priced(0.125, 0.0),
+            priced(0.5, 0.25),
+            priced(0.5, 0.25, run_state='completed', statuses={'A': 'approved'}, reservation_state='none'),
+        ]
+        out = StringIO()
+        with support.temp_dir() as directory:
+            with (
+                patch.object(maintenance, 'status_report', side_effect=reports),
+                patch.object(watch.shutil, 'get_terminal_size', return_value=os.terminal_size((200, 50))),
+            ):
+                watch.watch(support.workspace(directory), out, interactive=True, sleep=lambda _: None)
+        frames = out.getvalue().split('\x1b[H')[1:]
+        self.assertIn('assinatura (equivalente) US$ 0.1250', frames[0])
+        self.assertIn('executor US$ 0.5000 · revisor US$ 0.2500', frames[1])
+        self.assertIn('API US$ 0.2500', frames[2])
+
+    def test_line_mode_reports_models_once_and_each_cost_change(self):
+        first = watch.transitions(None, priced(0.125, 0.0))
+        self.assertEqual(sum('modelos: revisor claude sonnet' in line for line in first), 1)
+        self.assertEqual(sum('custo: API US$ 0.0000' in line for line in first), 1)
+        self.assertEqual(watch.transitions(priced(0.125, 0.0), priced(0.125, 0.0)), [])
+        (line,) = watch.transitions(priced(0.125, 0.0), priced(0.5, 0.25))
+        self.assertIn('custo: API US$ 0.2500 · assinatura (equivalente) US$ 0.5000', line)
+
+
+if __name__ == '__main__':
+    unittest.main()

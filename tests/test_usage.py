@@ -101,6 +101,39 @@ class AccumulationTests(unittest.TestCase):
         self.assertNotIn('usage', snapshot)
         self.assertNotIn('tokens', snapshot['timings']['A']['phases']['implementation'])
 
+    def test_each_measured_call_reaches_the_status_file_at_once(self):
+        with support.temp_dir() as directory:
+            run = new_state(directory)
+            with run.phase('A', 'review'):
+                usage.record('reviewer', CLAUDE_USAGE)
+                first = json.loads(run.path.read_text(encoding='utf-8'))
+                usage.record('reviewer', CLAUDE_USAGE)
+                second = json.loads(run.path.read_text(encoding='utf-8'))
+        self.assertEqual(first['cost']['plan_equivalent_usd'], 0.011607)
+        self.assertEqual(second['cost']['plan_equivalent_usd'], 0.023214)
+        self.assertEqual(second['usage']['reviewer']['calls'], 2)
+
+    def test_failed_partial_save_does_not_fail_the_call(self):
+        with support.temp_dir() as directory:
+            run = new_state(directory)
+            with patch.object(st, 'write_json', side_effect=OSError('arquivo em uso')), run.phase('A', 'review'):
+                usage.record('reviewer', CLAUDE_USAGE)
+            self.assertEqual(run.snapshot()['usage']['reviewer']['calls'], 1)
+
+    def test_status_names_the_configured_agents(self):
+        with (
+            patch.object(st.config, 'EXECUTOR', 'codex'),
+            patch.object(st.config, 'AGENT_MODEL', 'gpt-6-luna'),
+            patch.object(st.config, 'AGENT_EFFORT', 'high'),
+            patch.object(st.config, 'REVIEW_MODEL', 'opus'),
+        ):
+            agents = st.RunState(Path('status.json'), 'a' * 64).snapshot()['agents']
+        self.assertEqual(agents['executor'], {'cli': 'codex', 'model': 'gpt-6-luna', 'effort': 'high'})
+        self.assertEqual(agents['reviewer'], {'cli': 'claude', 'model': 'opus'})
+        with patch.object(st.config, 'EXECUTOR', 'agy'), patch.object(st.config, 'AGENT_EFFORT', 'high'):
+            executor = st.configured_agents()['executor']
+        self.assertIsNone(executor['effort'])
+
     def test_calls_outside_a_phase_are_ignored(self):
         usage.record('executor', AGY_USAGE)
 

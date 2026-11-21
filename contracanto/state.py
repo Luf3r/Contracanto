@@ -262,6 +262,7 @@ class RunState:
                 'details': self.details,
                 'timings': self.timings,
                 'recovery_required': self.recovery_required,
+                'agents': configured_agents(),
             }
             if self.usage:
                 data['usage'] = self.usage
@@ -349,6 +350,13 @@ class RunState:
             if used.model and used.model not in total.setdefault('models', []):
                 total['models'].append(used.model)
             self.usage[role] = total
+            # Grava já, para que quem acompanha veja o custo subir a cada chamada concluída, e não
+            # só no fim do lote. A medição nunca faz a chamada falhar: um erro aqui fica para a
+            # próxima gravação, que leva o mesmo total da memória.
+            try:
+                self.save()
+            except (OSError, RecoveryRequired) as error:
+                log.info('%s: custo parcial não gravado agora: %s', task_id, error)
 
     def _cost(self) -> dict[str, Any]:
         """Custo da execução separado entre cobrança por token e equivalente de assinatura."""
@@ -402,6 +410,23 @@ class RunState:
             self.recovery_required = True
             self.close_unfinished()
             self.save()
+
+
+def configured_agents() -> dict[str, dict[str, str | None]]:
+    """CLI e modelo de cada papel, como o processo que grava o status os configurou.
+
+    Um modelo vazio deixa o padrão do CLI; o esforço só existe no Codex, porque no agy ele faz
+    parte do id do modelo.
+    """
+    codex = config.EXECUTOR == 'codex'
+    return {
+        'executor': {
+            'cli': config.EXECUTOR,
+            'model': config.AGENT_MODEL or None,
+            'effort': (config.AGENT_EFFORT or None) if codex else None,
+        },
+        'reviewer': {'cli': 'claude', 'model': config.REVIEW_MODEL},
+    }
 
 
 BILLING: dict[str, Callable[[], str]] = {

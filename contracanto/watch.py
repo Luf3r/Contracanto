@@ -142,6 +142,58 @@ def _money(usd: float) -> str:
     return f'US$ {usd:.2f}' if usd >= 1 else f'US$ {usd:.4f}'
 
 
+ROLE_NAMES = {'reviewer': 'revisor', 'executor': 'executor'}
+
+
+def _role_model(run: dict[str, Any], role: str) -> str | None:
+    """`cli modelo` de um papel: o modelo configurado e, se a saída do CLI informou outro, também esse."""
+    configured = ((run.get('agents') or {}).get(role)) or {}
+    if not isinstance(configured, dict):
+        configured = {}
+    reported = [str(m) for m in ((run.get('usage') or {}).get(role) or {}).get('models') or [] if m]
+    model = configured.get('model')
+    if not configured and not reported:
+        return None
+    if not model:
+        # Sem modelo fixado vale o padrão do CLI, que a primeira chamada medida revela.
+        name = ', '.join(reported) or 'modelo padrão'
+    else:
+        others = [m for m in reported if m != model]
+        name = f'{model} ({", ".join(others)})' if others else str(model)
+    text = f'{configured.get("cli") or "?"} {name}'
+    if configured.get('effort'):
+        text += f', esforço {configured["effort"]}'
+    return text
+
+
+def models_text(run: dict[str, Any]) -> str | None:
+    """Os modelos de cada papel, revisor primeiro, ou None quando o status não diz nenhum."""
+    parts = [
+        f'{ROLE_NAMES[role]} {text}'
+        for role in ('reviewer', 'executor')
+        if (text := _role_model(run, role)) is not None
+    ]
+    return ' · '.join(parts) or None
+
+
+def cost_text(run: dict[str, Any]) -> str | None:
+    """Custo estimado até a última gravação do status, total e por papel; None antes da primeira chamada."""
+    cost = run.get('cost') or {}
+    if not cost:
+        return None
+    parts = [
+        f'API {_money(cost.get("api_usd") or 0)}',
+        f'assinatura (equivalente) {_money(cost.get("plan_equivalent_usd") or 0)}',
+    ]
+    for role in ('executor', 'reviewer'):
+        total = (run.get('usage') or {}).get(role)
+        if isinstance(total, dict) and 'cost_usd' in total:
+            parts.append(f'{ROLE_NAMES[role]} {_money(total["cost_usd"])}')
+    if cost.get('unpriced_calls'):
+        parts.append(f'{cost["unpriced_calls"]} chamada(s) sem preço')
+    return ' · '.join(parts)
+
+
 def _labeled_error(detail: dict[str, Any]) -> str | None:
     """Erro da tarefa precedido da categoria da falha, quando ela foi registrada."""
     error = detail.get('error')
@@ -179,6 +231,13 @@ def render(report: dict[str, Any], log: str, now: datetime, width: int = 100, co
         notes.append('exige recuperação manual')
     if notes:
         lines.append(p.dim(' · '.join(notes)))
+    models = models_text(run)
+    if models:
+        lines.append(p.bold('Modelos') + '  ' + _clip(models, width - 9))
+    cost = cost_text(run)
+    if cost or run_state not in state.TERMINAL_STATES:
+        # O custo sobe a cada chamada concluída de executor ou revisor; o painel relê o status a cada volta.
+        lines.append(p.bold('Custo') + '    ' + _clip(cost or 'nenhuma chamada concluída ainda', width - 9))
     lines.append('')
 
     statuses: dict[str, str] = run.get('statuses') or {}
@@ -222,16 +281,6 @@ def render(report: dict[str, Any], log: str, now: datetime, width: int = 100, co
             summary = _clip(maintenance.abbreviate(str(error), room), room)
             lines.append('  ' + p.paint(task_id, 'failed') + ': ' + summary)
 
-    cost = run.get('cost') or {}
-    if cost:
-        parts = [
-            f'API {_money(cost.get("api_usd") or 0)}',
-            f'assinatura (equivalente) {_money(cost.get("plan_equivalent_usd") or 0)}',
-        ]
-        if cost.get('unpriced_calls'):
-            parts.append(f'{cost["unpriced_calls"]} chamada(s) sem preço')
-        lines += ['', p.bold('Custo') + '  ' + _clip(' · '.join(parts), width)]
-
     waste = run.get('waste') or {}
     if waste.get('tasks'):
         categories = ', '.join(f'{name} {count}' for name, count in sorted((waste.get('by_category') or {}).items()))
@@ -272,6 +321,9 @@ def transitions(previous: dict[str, Any] | None, report: dict[str, Any]) -> list
     lines = []
     if run.get('state') != before.get('state') and run.get('state'):
         lines.append(f'{stamp} execução {str(run.get("run_id"))[:12]}: {run["state"]}')
+    models = models_text(run)
+    if models and models != (models_text(before) if before else None):
+        lines.append(f'{stamp} modelos: {models}')
     old: dict[str, str] = before.get('statuses') or {}
     for task_id, status in (run.get('statuses') or {}).items():
         if old.get(task_id) != status:
@@ -284,6 +336,9 @@ def transitions(previous: dict[str, Any] | None, report: dict[str, Any]) -> list
         for entry in (detail.get('reviews') or [])[seen:]:
             if isinstance(entry, dict) and not entry.get('approved'):
                 lines.append(f'{stamp} {task_id}: {_clip(review_summary(entry), 300)}')
+    cost = cost_text(run)
+    if cost and cost != (cost_text(before) if before else None):
+        lines.append(f'{stamp} custo: {cost}')
     return lines
 
 
